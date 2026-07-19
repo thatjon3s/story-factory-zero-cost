@@ -423,7 +423,11 @@ def produce(control: ControlPlane) -> None:
     episode = candidates[0]
     control.update(episode["id"], {"status": "producing"}, episode["status"])
     try:
-        package = ollama_story(episode)
+        existing_package = episode.get("package") or {}
+        if existing_package.get("script"):
+            package = existing_package
+        else:
+            package = ollama_story(episode)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); voice = workdir / "voice.wav"; video = workdir / "episode.mp4"
             synthesize_voice(package["script"], voice)
