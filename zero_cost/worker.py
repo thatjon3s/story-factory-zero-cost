@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cost_guard import CostGuard
+from krea_provider import create_krea_clips
 
 
 TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Europe/Berlin"))
@@ -163,9 +164,14 @@ Serie: {episode['series_name']}, Folge {episode['episode_no']}.
 Prämisse: {episode['premise'] or episode['title']}.
 
 Schreibe eine originelle fiktionale Folge mit 1.350 bis 1.650 deutschen Wörtern. Sie benötigt einen sofortigen
-Cold Open, drei Eskalationen, eine beantwortete Teilfrage und am Ende einen präzisen Cliffhanger. Keine realen
-Behauptungen, keine geschützten Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
-{{"title":"...","description":"...","thumbnail_text":"maximal 4 Wörter","tags":["..."],"script":"..."}}
+Cold Open, drei Eskalationen, eine beantwortete Teilfrage und am Ende einen präzisen Cliffhanger. Menschen müssen
+die Handlung sichtbar ausführen; keine abstrakten Symbolbilder. Definiere zwei bis vier wiederkehrende Figuren mit
+unveränderlichen Merkmalen und exakt acht filmische Schlüsselszenen. Keine realen Behauptungen, keine geschützten
+Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
+{{"title":"...","description":"...","thumbnail_text":"maximal 4 Wörter","tags":["..."],"script":"...",
+"character_bible":"Alter, Gesicht, Haare, Kleidung und Körperbau jeder Figur",
+"scenes":[{{"image_prompt":"Menschen, Ort, sichtbare Handlung, Kamera und Licht",
+"motion_prompt":"konkrete Körperbewegung, Reaktion und Kamerabewegung"}}]}}
 """
     schema = {
         "type": "object",
@@ -175,8 +181,17 @@ Behauptungen, keine geschützten Figuren, keine Imitation lebender Autoren. Gib 
             "thumbnail_text": {"type": "string"},
             "tags": {"type": "array", "items": {"type": "string"}},
             "script": {"type": "string"},
+            "character_bible": {"type": "string"},
+            "scenes": {
+                "type": "array", "minItems": 8, "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {"image_prompt": {"type": "string"}, "motion_prompt": {"type": "string"}},
+                    "required": ["image_prompt", "motion_prompt"],
+                },
+            },
         },
-        "required": ["title", "description", "thumbnail_text", "tags", "script"],
+        "required": ["title", "description", "thumbnail_text", "tags", "script", "character_bible", "scenes"],
     }
     payload = {
         "model": os.getenv("OLLAMA_MODEL", "qwen3:4b"), "prompt": prompt, "stream": False,
@@ -324,11 +339,31 @@ def build_scene_images(script: str, workdir: Path, count: int = 12) -> list[Path
     return images
 
 
-def render_video(package: dict[str, Any], voice: Path, output: Path, workdir: Path) -> None:
+def render_video(
+    package: dict[str, Any], voice: Path, output: Path, workdir: Path, clips: list[Path] | None = None
+) -> None:
     CostGuard().require_free("ffmpeg")
     duration = media_duration(voice)
     subtitle = workdir / "subtitles.srt"
     paragraphs_to_srt(package["script"], subtitle, duration)
+    if clips:
+        concat = workdir / "clips.txt"
+        concat.write_text("\n".join(f"file '{clip.as_posix()}'" for clip in clips), encoding="utf-8")
+        visual = workdir / "human-action.mp4"
+        subprocess.run([
+            "ffmpeg", "-y", "-stream_loop", "-1", "-f", "concat", "-safe", "0", "-i", str(concat),
+            "-t", f"{duration:.3f}",
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30",
+            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", str(visual),
+        ], check=True, timeout=3600)
+        escaped = str(subtitle.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(visual), "-i", str(voice),
+            "-vf", f"subtitles='{escaped}':force_style='FontName=DejaVu Sans,FontSize=11,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3,Outline=1,MarginV=40,Alignment=2'",
+            "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+            "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(output),
+        ], check=True, timeout=3600)
+        return
     images = build_scene_images(package["script"], workdir)
     escaped = str(subtitle.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     scene_duration = duration / len(images)
@@ -431,7 +466,8 @@ def produce(control: ControlPlane) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); voice = workdir / "voice.wav"; video = workdir / "episode.mp4"
             synthesize_voice(package["script"], voice)
-            render_video(package, voice, video, workdir)
+            clips = create_krea_clips(package, workdir) if os.getenv("VISUAL_PROVIDER", "krea") == "krea" else None
+            render_video(package, voice, video, workdir, clips)
             youtube_id = YouTube().upload_private(video, package)
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         control.update(episode["id"], {
