@@ -27,6 +27,13 @@ PIPELINE_TARGET = int(os.getenv("PIPELINE_TARGET", "8"))
 
 
 class ControlPlane:
+    LABELS = {
+        "episode": "1f6feb", "idea": "6f42c1", "producing": "d4c5f9",
+        "awaiting_approval": "fbca04", "approved": "0e8a16",
+        "approved_reserve": "2da44e", "scheduled": "0969da",
+        "published": "1d76db", "failed": "d73a4a", "rejected": "b60205",
+    }
+
     def __init__(self) -> None:
         self.url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
         self.key = os.environ["GITHUB_TOKEN"]
@@ -43,6 +50,12 @@ class ControlPlane:
             response = client.request(method, f"{self.url}/{path}", headers=self.headers, **kwargs)
             response.raise_for_status()
             return response.json() if response.content else None
+
+    def ensure_labels(self) -> None:
+        existing = {label["name"] for label in self._request("GET", "labels", params={"per_page": 100})}
+        for name, color in self.LABELS.items():
+            if name not in existing:
+                self._request("POST", "labels", json={"name": name, "color": color})
 
     @staticmethod
     def _body(row: dict[str, Any]) -> str:
@@ -337,7 +350,7 @@ def metrics(control: ControlPlane) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics"]); args = parser.parse_args()
-    CostGuard(); control = ControlPlane()
+    CostGuard(); control = ControlPlane(); control.ensure_labels()
     {"produce": produce, "tick": tick, "metrics": metrics}[args.command](control)
 
 
