@@ -206,7 +206,7 @@ class YouTube:
         return Credentials(
             token=None, refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
             token_uri="https://oauth2.googleapis.com/token", client_id=os.environ["YOUTUBE_CLIENT_ID"],
-            client_secret=os.environ["YOUTUBE_CLIENT_SECRET"], scopes=self.scopes,
+            client_secret=os.getenv("YOUTUBE_CLIENT_SECRET") or None, scopes=self.scopes,
         )
 
     def service(self, name: str = "youtube", version: str = "v3"):
