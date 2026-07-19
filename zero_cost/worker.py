@@ -151,20 +151,40 @@ Cold Open, drei Eskalationen, eine beantwortete Teilfrage und am Ende einen prä
 Behauptungen, keine geschützten Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
 {{"title":"...","description":"...","thumbnail_text":"maximal 4 Wörter","tags":["..."],"script":"..."}}
 """
-    payload = {"model": os.getenv("OLLAMA_MODEL", "qwen3:4b"), "prompt": prompt, "stream": False, "format": "json"}
+    schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "thumbnail_text": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "script": {"type": "string"},
+        },
+        "required": ["title", "description", "thumbnail_text", "tags", "script"],
+    }
+    payload = {
+        "model": os.getenv("OLLAMA_MODEL", "qwen3:4b"), "prompt": prompt, "stream": False,
+        "format": schema, "think": False,
+        "options": {"num_predict": 6000, "temperature": 0.8},
+    }
+    failures: list[str] = []
     for attempt in range(3):
         response = httpx.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=900)
         response.raise_for_status()
         try:
             package = json.loads(response.json()["response"])
             words = len(package["script"].split())
-            if 1100 <= words <= 1900:
+            if 1050 <= words <= 2000 and all(package.get(key) for key in schema["required"]):
                 revision = hashlib.sha256(package["script"].encode("utf-8")).hexdigest()[:16]
                 return {**package, "revision": revision, "generator": payload["model"], "word_count": words}
-        except (KeyError, json.JSONDecodeError):
-            pass
-        payload["prompt"] += "\nDie vorige Ausgabe war ungültig. Halte das JSON-Schema und die Wortzahl exakt ein."
-    raise RuntimeError("Local story model failed validation three times")
+            failures.append(f"attempt {attempt + 1}: {words} words")
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            failures.append(f"attempt {attempt + 1}: {type(exc).__name__}")
+        payload["prompt"] += (
+            "\nDie vorige Ausgabe war ungültig oder zu kurz. Liefere mindestens 1.350 Wörter im Feld script, "
+            "ohne Vorrede und ohne Markdown; alle fünf JSON-Felder sind Pflicht."
+        )
+    raise RuntimeError("Local story model failed validation: " + "; ".join(failures))
 
 
 def paragraphs_to_srt(script: str, destination: Path) -> None:
@@ -268,7 +288,7 @@ def next_slots(count: int) -> list[datetime]:
 
 
 def produce(control: ControlPlane) -> None:
-    candidates = control.episodes("idea", 1) or control.episodes("rejected", 1)
+    candidates = control.episodes("idea", 1) or control.episodes("failed", 1) or control.episodes("rejected", 1)
     if not candidates:
         active = sum(len(control.episodes(status)) for status in ("producing", "awaiting_approval", "approved_reserve", "scheduled"))
         if active >= PIPELINE_TARGET:
