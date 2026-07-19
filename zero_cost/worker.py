@@ -59,7 +59,16 @@ class ControlPlane:
 
     @staticmethod
     def _body(row: dict[str, Any]) -> str:
-        return "## Automationsstatus\n\n```json\n" + json.dumps(row, ensure_ascii=False, indent=2) + "\n```"
+        review = ""
+        if row.get("status") == "awaiting_approval" and row.get("preview_youtube_id"):
+            review = (
+                "## Deine Freigabe\n\n"
+                f"[Private Prüffassung auf YouTube ansehen](https://youtu.be/{row['preview_youtube_id']})\n\n"
+                "- **Freigeben:** Rechts unter `Labels` das Label `approved` hinzufügen.\n"
+                "- **Nicht freigeben:** Nichts tun; das Video bleibt privat und wird nicht veröffentlicht.\n"
+                f"- **Frist:** `{row.get('approval_deadline', 'nicht gesetzt')}`\n\n"
+            )
+        return review + "## Automationsstatus\n\n```json\n" + json.dumps(row, ensure_ascii=False, indent=2) + "\n```"
 
     @staticmethod
     def _data(issue: dict[str, Any]) -> dict[str, Any]:
@@ -106,7 +115,10 @@ class ControlPlane:
         row.update(values); row["updated_at"] = datetime.now(timezone.utc).isoformat()
         labels = ["episode", row.get("status", "idea")]
         if "approved" in row.get("labels", []): labels.append("approved")
-        saved = self._request("PATCH", f"issues/{episode_id}", json={"title": f"[Folge {row.get('episode_no')}] {row.get('title')}", "body": self._body(row), "labels": labels})
+        payload = {"title": f"[Folge {row.get('episode_no')}] {row.get('title')}", "body": self._body(row), "labels": labels}
+        if row.get("status") == "awaiting_approval":
+            payload["assignees"] = [self.owner_id]
+        saved = self._request("PATCH", f"issues/{episode_id}", json=payload)
         return self._data(saved)
 
     def event(self, kind: str, episode_id: int | None = None, **detail: Any) -> None:
@@ -340,6 +352,7 @@ def tick(control: ControlPlane) -> None:
     schedule_approved(control)
     now = datetime.now(timezone.utc)
     for episode in control.episodes("awaiting_approval"):
+        episode = control.update(episode["id"], {}, "awaiting_approval")
         if not episode["approval_deadline"]: continue
         remaining = (datetime.fromisoformat(episode["approval_deadline"]) - now).total_seconds() / 3600
         for threshold in (24, 6):
