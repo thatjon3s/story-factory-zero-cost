@@ -1,0 +1,41 @@
+name: Schedule, reminders and controlling
+on:
+  schedule:
+    - cron: "11 */6 * * *"
+    - cron: "43 7 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: story-control
+  cancel-in-progress: false
+jobs:
+  control:
+    if: vars.AUTOMATION_ENABLED == 'true'
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      MAX_EXTERNAL_MONTHLY_EUR: "0"
+      ALLOW_PAID_API: "false"
+      APP_TIMEZONE: Europe/Berlin
+      PUBLISH_DAYS: "0,2,4"
+      PUBLISH_TIME: "18:00"
+      RESERVE_TARGET: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r zero_cost/requirements.txt
+      - run: python zero_cost/worker.py tick
+      - name: Daily metrics
+        if: github.event.schedule == '43 7 * * *' || github.event_name == 'workflow_dispatch'
+        run: python zero_cost/worker.py metrics
