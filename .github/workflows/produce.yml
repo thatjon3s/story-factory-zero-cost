@@ -21,6 +21,11 @@ jobs:
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      KREA_API_TOKEN: ${{ secrets.KREA_API_TOKEN }}
+      VISUAL_PROVIDER: "krea"
+      KREA_IMAGE_ENDPOINT: "/generate/image/google/nano-banana"
+      KREA_VIDEO_ENDPOINT: "/generate/video/xai/grok-video-1.5"
+      KREA_VIDEO_RESOLUTION: "720p"
       MAX_EXTERNAL_MONTHLY_EUR: "0"
       ALLOW_PAID_API: "false"
       OLLAMA_MODEL: "qwen3:4b"
