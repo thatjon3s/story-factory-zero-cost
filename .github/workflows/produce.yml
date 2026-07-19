@@ -26,7 +26,8 @@ jobs:
       OLLAMA_MODEL: "qwen3:4b"
       PIPELINE_TARGET: "8"
       AUTO_SERIES_NAME: "Die letzte Leitung"
-      PIPER_MODEL_PATH: ${{ github.workspace }}/voices/de_DE-thorsten-high.onnx
+      PIPER_MODEL_PATH: ${{ github.workspace }}/voices/de_DE-thorsten_emotional-medium.onnx
+      NARRATOR_PITCH: "0.94"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,13 +38,13 @@ jobs:
       - name: Install free local model and renderer
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg librsvg2-bin
           curl -fsSL https://ollama.com/install.sh | sh
           ollama serve >/tmp/ollama.log 2>&1 &
           ollama pull "$OLLAMA_MODEL"
       - name: Download German voice
         run: |
           mkdir -p voices
-          curl -fL -o voices/de_DE-thorsten-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
-          curl -fL -o voices/de_DE-thorsten-high.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
+          curl -fL -o voices/de_DE-thorsten_emotional-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx
+          curl -fL -o voices/de_DE-thorsten_emotional-medium.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json
       - run: python zero_cost/worker.py produce
