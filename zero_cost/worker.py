@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -87,6 +88,9 @@ class ControlPlane:
                 package = row.get("package") or {}
                 row["status"] = "approved_reserve"; row["approved_revision"] = package.get("revision")
                 self.update(row["id"], {"status": row["status"], "approved_revision": row["approved_revision"]})
+            elif row.get("status") == "awaiting_approval" and "rejected" in row["labels"]:
+                row["status"] = "rejected"
+                self.update(row["id"], {"status": "rejected", "rejected_reason": "Neue Inszenierung angefordert"})
         rows.sort(key=lambda x: int(x.get("episode_no", 0)))
         return [x for x in rows if not status or x.get("status") == status][:limit]
 
@@ -199,13 +203,42 @@ Behauptungen, keine geschützten Figuren, keine Imitation lebender Autoren. Gib 
     raise RuntimeError("Local story model failed validation: " + "; ".join(failures))
 
 
-def paragraphs_to_srt(script: str, destination: Path) -> None:
-    chunks = [c.strip() for c in re.split(r"\n+|(?<=[.!?])\s+(?=[A-ZÄÖÜ])", script) if c.strip()]
+def story_chunks(script: str, max_words: int = 11) -> list[str]:
+    sentences = [c.strip() for c in re.split(r"\n+|(?<=[.!?…])\s+(?=[A-ZÄÖÜ„\"])", script) if c.strip()]
+    chunks: list[str] = []
+    for sentence in sentences:
+        words = sentence.split()
+        if len(words) <= max_words:
+            chunks.append(sentence)
+            continue
+        while words:
+            take = min(max_words, len(words))
+            if len(words) > max_words:
+                for index in range(min(max_words, len(words)) - 1, max(3, max_words - 5), -1):
+                    if words[index].endswith((",", ";", ":")):
+                        take = index + 1
+                        break
+            chunks.append(" ".join(words[:take]))
+            words = words[take:]
+    return chunks
+
+
+def media_duration(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    return float(result.stdout.strip())
+
+
+def paragraphs_to_srt(script: str, destination: Path, total_duration: float | None = None) -> None:
+    chunks = story_chunks(script)
     words_total = max(1, sum(len(c.split()) for c in chunks))
     cursor = 0.0
     lines: list[str] = []
+    available = total_duration or (words_total / 2.25)
     for index, chunk in enumerate(chunks, 1):
-        duration = max(2.2, len(chunk.split()) / words_total * (words_total / 2.25))
+        duration = max(1.15, len(chunk.split()) / words_total * available)
         start, end = cursor, cursor + duration
         def stamp(seconds: float) -> str:
             millis = int(seconds * 1000); hours, rem = divmod(millis, 3_600_000); minutes, rem = divmod(rem, 60_000); secs, ms = divmod(rem, 1000)
@@ -215,26 +248,105 @@ def paragraphs_to_srt(script: str, destination: Path) -> None:
     destination.write_text("\n".join(lines), encoding="utf-8")
 
 
+def narration_style(text: str) -> tuple[float, float]:
+    lowered = text.lower()
+    if any(word in lowered for word in ("flüster", "stille", "leise", "atem", "wartete", "dunkel", "niemand")):
+        return 1.13, 0.62
+    if "!" in text or any(word in lowered for word in ("plötzlich", "alarm", "schrie", "rannte", "jetzt", "gefahr")):
+        return 0.92, 0.24
+    if "?" in text:
+        return 1.04, 0.48
+    return 1.01, 0.36
+
+
 def synthesize_voice(script: str, output: Path) -> None:
     CostGuard().require_free("piper")
-    command = ["piper", "--model", os.environ["PIPER_MODEL_PATH"], "--output_file", str(output)]
-    subprocess.run(command, input=script, text=True, encoding="utf-8", check=True, timeout=1800)
+    sentences = [c.strip() for c in re.split(r"(?<=[.!?…])\s+(?=[A-ZÄÖÜ„\"])", script) if c.strip()]
+    workdir = output.parent / "narration_parts"; workdir.mkdir(exist_ok=True)
+    parts: list[Path] = []
+    for index in range(0, len(sentences), 4):
+        text = " ".join(sentences[index:index + 4])
+        length_scale, silence = narration_style(text)
+        part = workdir / f"part-{len(parts):03d}.wav"
+        command = [
+            "piper", "--model", os.environ["PIPER_MODEL_PATH"], "--output_file", str(part),
+            "--length_scale", str(length_scale), "--sentence_silence", str(silence),
+        ]
+        subprocess.run(command, input=text, text=True, encoding="utf-8", check=True, timeout=300)
+        parts.append(part)
+    concat = workdir / "parts.txt"
+    concat.write_text("\n".join(f"file '{part.as_posix()}'" for part in parts), encoding="utf-8")
+    pitch = float(os.getenv("NARRATOR_PITCH", "0.94"))
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
+        "-af", f"asetrate=22050*{pitch},aresample=22050,atempo={1 / pitch:.5f},dynaudnorm=f=250:g=9",
+        "-c:a", "pcm_s16le", str(output),
+    ], check=True, timeout=600)
+
+
+def scene_svg(text: str, index: int, destination: Path) -> None:
+    lowered = text.lower()
+    palettes = [("#070a16", "#183057", "#5d7cff"), ("#10070f", "#4b1535", "#ff477e"), ("#061313", "#164e50", "#4fe0c1")]
+    dark, mid, glow = palettes[index % len(palettes)]
+    symbols = []
+    if any(word in lowered for word in ("telefon", "anruf", "leitung", "hörer")):
+        symbols.append('<path d="M700 310 C620 420 650 620 790 720 L900 610 820 520 755 575 C710 520 700 455 735 405 L810 450 885 335 790 265 Z"/>')
+    if any(word in lowered for word in ("uhr", "zeit", "sekunde", "jahr")):
+        symbols.append('<circle cx="1200" cy="470" r="210"/><path d="M1200 330V470L1310 545"/>')
+    if any(word in lowered for word in ("tür", "gang", "raum", "zentrale", "gebäude")):
+        symbols.append('<path d="M650 180H1260V850H650Z M760 290H1140V850H760Z M1060 565h18"/>')
+    if not symbols:
+        symbols.append('<path d="M540 780L820 320 1030 650 1240 250 1430 780Z"/>')
+    title_words = [w.strip('.,:;!?„“\"') for w in text.split() if len(w.strip('.,:;!?„“\"')) > 4][:5]
+    title = html.escape(" ".join(title_words).upper() or "DIE LETZTE LEITUNG")
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+<defs><radialGradient id="g"><stop stop-color="{mid}"/><stop offset="1" stop-color="{dark}"/></radialGradient>
+<filter id="blur"><feGaussianBlur stdDeviation="34"/></filter></defs>
+<rect width="1920" height="1080" fill="url(#g)"/><circle cx="{380 + index * 97 % 1200}" cy="420" r="330" fill="{glow}" opacity=".16" filter="url(#blur)"/>
+<g fill="none" stroke="{glow}" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" opacity=".82">{''.join(symbols)}</g>
+<g fill="none" stroke="white" opacity=".10">{''.join(f'<circle cx="{160 + n * 170}" cy="{120 + (n * 83) % 700}" r="{20 + n * 7}"/>' for n in range(9))}</g>
+<text x="110" y="135" fill="white" opacity=".78" font-family="DejaVu Sans" font-size="34" letter-spacing="8">SZENE {index + 1:02d}</text>
+<text x="110" y="940" fill="white" font-family="DejaVu Sans" font-weight="bold" font-size="54">{title}</text>
+</svg>'''
+    destination.write_text(svg, encoding="utf-8")
+
+
+def build_scene_images(script: str, workdir: Path, count: int = 12) -> list[Path]:
+    sentences = [c.strip() for c in re.split(r"(?<=[.!?…])\s+", script) if c.strip()]
+    images: list[Path] = []
+    for index in range(count):
+        start = index * len(sentences) // count
+        end = max(start + 1, (index + 1) * len(sentences) // count)
+        svg = workdir / f"scene-{index:02d}.svg"; png = workdir / f"scene-{index:02d}.png"
+        scene_svg(" ".join(sentences[start:end]), index, svg)
+        subprocess.run(["rsvg-convert", "-w", "1920", "-h", "1080", "-o", str(png), str(svg)], check=True, timeout=60)
+        images.append(png)
+    return images
 
 
 def render_video(package: dict[str, Any], voice: Path, output: Path, workdir: Path) -> None:
     CostGuard().require_free("ffmpeg")
+    duration = media_duration(voice)
     subtitle = workdir / "subtitles.srt"
-    paragraphs_to_srt(package["script"], subtitle)
+    paragraphs_to_srt(package["script"], subtitle, duration)
+    images = build_scene_images(package["script"], workdir)
     escaped = str(subtitle.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-    filters = (
-        "[0:v]noise=alls=8:allf=t+u,drawbox=x=110:y=90:w=1700:h=900:color=black@0.18:t=fill[bg];"
-        "[1:a]showwaves=s=1450x170:mode=cline:colors=0x6e7dff@0.75:scale=sqrt[wave];"
-        f"[bg][wave]overlay=(W-w)/2:760,subtitles='{escaped}':force_style='FontName=DejaVu Sans,FontSize=24,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=56'[v]"
-    )
+    scene_duration = duration / len(images)
+    inputs: list[str] = []
+    chains: list[str] = []
+    for index, image in enumerate(images):
+        inputs += ["-loop", "1", "-t", f"{scene_duration + 0.6:.3f}", "-i", str(image)]
+        direction = "iw-iw/zoom" if index % 2 else "0"
+        chains.append(f"[{index}:v]scale=2048:1152,zoompan=z='min(zoom+0.0007,1.12)':x='{direction}':y='ih/2-(ih/zoom/2)':d={int((scene_duration + 0.6) * 30)}:s=1920x1080:fps=30,setsar=1[v{index}]")
+    current = "v0"; elapsed = scene_duration
+    for index in range(1, len(images)):
+        out = f"x{index}"
+        chains.append(f"[{current}][v{index}]xfade=transition=fade:duration=0.6:offset={elapsed - 0.6:.3f}[{out}]")
+        current = out; elapsed += scene_duration
+    audio_index = len(images)
+    chains.append(f"[{current}]subtitles='{escaped}':force_style='FontName=DejaVu Sans,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H70000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=24,Alignment=2'[v]")
     subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x080b16:s=1920x1080:r=30",
-        "-i", str(voice), "-filter_complex", filters, "-map", "[v]", "-map", "1:a",
+        "ffmpeg", "-y", *inputs, "-i", str(voice), "-filter_complex", ";".join(chains), "-map", "[v]", "-map", f"{audio_index}:a",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "160k",
         "-shortest", "-movflags", "+faststart", str(output)
     ], check=True, timeout=3600)
