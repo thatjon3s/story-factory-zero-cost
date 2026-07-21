@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cost_guard import CostGuard
+from fallback_provider import create_fallback_clips
 from krea_provider import create_krea_clips
 
 
@@ -178,6 +179,11 @@ def telegram_review(
         "Danach bleibt die Folge privat und eine Reservefolge übernimmt den Termin.\n"
         f"Vorschau: https://youtu.be/{youtube_id}"
     )
+    if package.get("visual_mode") == "fallback":
+        caption += (
+            "\n\n⚠️ Kostenlose Fallback-Generierung"
+            f"\nToken: {package['generation_token']}"
+        )
     api = f"https://api.telegram.org/bot{token}"
     sent = False
     max_bytes = int(os.getenv("TELEGRAM_MAX_VIDEO_MB", "49")) * 1024 * 1024
@@ -586,7 +592,22 @@ def produce(control: ControlPlane) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); voice = workdir / "voice.wav"; video = workdir / "episode.mp4"
             synthesize_voice(package["script"], voice)
-            clips = create_krea_clips(package, workdir) if os.getenv("VISUAL_PROVIDER", "krea") == "krea" else None
+            clips = None
+            if os.getenv("VISUAL_PROVIDER", "krea") == "krea":
+                try:
+                    clips = create_krea_clips(package, workdir)
+                    package = {**package, "visual_mode": "krea", "generation_token": ""}
+                except Exception as krea_error:
+                    token = f"FALLBACK-{package['revision'][:8].upper()}"
+                    control.event(
+                        "visual_fallback_started", episode["id"],
+                        token=token, krea_error=repr(krea_error),
+                    )
+                    clips = create_fallback_clips(package, workdir, token)
+                    package = {
+                        **package, "visual_mode": "fallback", "generation_token": token,
+                        "visual_fallback_reason": type(krea_error).__name__,
+                    }
             render_video(package, voice, video, workdir, clips)
             youtube_id = YouTube().upload_private(video, package)
             control.update(episode["id"], {
