@@ -35,7 +35,12 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r zero_cost/requirements.txt
-      - run: python zero_cost/worker.py tick
+      - name: Run control cycle
+        run: |
+          set -o pipefail
+          python zero_cost/worker.py tick 2>&1 | tee /tmp/story-control.log
       - name: Daily metrics
         if: github.event.schedule == '43 7 * * *' || github.event_name == 'workflow_dispatch'
-        run: python zero_cost/worker.py metrics
+        run: |
+          set -o pipefail
+          python zero_cost/worker.py metrics 2>&1 | tee -a /tmp/story-control.log

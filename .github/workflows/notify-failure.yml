@@ -1,0 +1,70 @@
+name: Telegram failure reporter
+on:
+  workflow_run:
+    workflows:
+      - Produce review video
+      - Schedule, reminders and controlling
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  notify:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+      FAILED_RUN_NAME: ${{ github.event.workflow_run.name }}
+      FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+      FAILED_RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      FAILED_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Download complete failed-run logs
+        run: |
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${FAILED_RUN_ID}/logs" \
+            -o /tmp/run-logs.zip
+          mkdir -p /tmp/run-logs
+          unzip -q /tmp/run-logs.zip -d /tmp/run-logs
+          find /tmp/run-logs -type f -name '*.txt' -print0 \
+            | sort -z \
+            | xargs -0 cat > /tmp/combined-run.log
+          {
+            echo "Workflow: ${FAILED_RUN_NAME}"
+            echo "Run ID: ${FAILED_RUN_ID}"
+            echo "Branch: ${FAILED_RUN_BRANCH}"
+            echo "Commit: ${FAILED_RUN_SHA}"
+            echo "URL: ${FAILED_RUN_URL}"
+            echo
+            echo "===== LAST 4.5 MB OF COMPLETE GITHUB LOG ====="
+            tail -c 4500000 /tmp/combined-run.log
+          } > /tmp/story-factory-failure.log
+
+      - name: Send Telegram alert and error log
+        if: always() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          SUMMARY="❌ Story Factory: Serverlauf fehlgeschlagen
+
+          Workflow: ${FAILED_RUN_NAME}
+          Branch: ${FAILED_RUN_BRANCH}
+          Fehlerlog: als Datei angehängt
+          GitHub: ${FAILED_RUN_URL}"
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${SUMMARY}"
+          if [ -f /tmp/story-factory-failure.log ]; then
+            curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "caption=${FAILED_RUN_NAME} – vollständiger Fehlerlog-Auszug" \
+              -F "document=@/tmp/story-factory-failure.log;type=text/plain"
+          fi

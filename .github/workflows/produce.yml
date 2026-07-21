@@ -70,7 +70,17 @@ jobs:
           mkdir -p voices
           curl -fL -o voices/de_DE-thorsten_emotional-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx
           curl -fL -o voices/de_DE-thorsten_emotional-medium.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json
-      - run: python zero_cost/worker.py produce
+      - name: Produce video
+        run: |
+          set -o pipefail
+          python zero_cost/worker.py produce 2>&1 | tee /tmp/story-factory.log
       - name: Show local model diagnostics
         if: failure()
-        run: tail -n 200 /tmp/ollama.log || true
+        run: |
+          if [ -f /tmp/ollama.log ]; then
+            {
+              echo
+              echo "===== OLLAMA DIAGNOSTICS ====="
+              tail -n 200 /tmp/ollama.log
+            } | tee -a /tmp/story-factory.log
+          fi
