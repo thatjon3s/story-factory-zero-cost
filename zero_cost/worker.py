@@ -157,6 +157,125 @@ def notify(subject: str, body: str) -> None:
         response.raise_for_status()
 
 
+def telegram_review(
+    video: Path, episode_id: int, package: dict[str, Any], youtube_id: str, deadline: datetime
+) -> None:
+    token, chat = os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        notify(
+            f"Freigabe benötigt: {package['title']}",
+            f"Prüffassung: https://youtu.be/{youtube_id}\nFrist: {deadline.isoformat()}",
+        )
+        return
+    revision = package["revision"]
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ Freigeben", "callback_data": f"approve:{episode_id}:{revision}"},
+        {"text": "❌ Ablehnen", "callback_data": f"reject:{episode_id}:{revision}"},
+    ]]}
+    caption = (
+        f"🎬 {package['title']}\n\n"
+        f"Bitte bis {deadline.astimezone(TZ).strftime('%d.%m.%Y, %H:%M Uhr')} prüfen. "
+        "Danach bleibt die Folge privat und eine Reservefolge übernimmt den Termin.\n"
+        f"Vorschau: https://youtu.be/{youtube_id}"
+    )
+    api = f"https://api.telegram.org/bot{token}"
+    sent = False
+    max_bytes = int(os.getenv("TELEGRAM_MAX_VIDEO_MB", "49")) * 1024 * 1024
+    if video.stat().st_size <= max_bytes:
+        try:
+            with video.open("rb") as handle:
+                response = httpx.post(
+                    f"{api}/sendVideo",
+                    data={
+                        "chat_id": chat, "caption": caption,
+                        "reply_markup": json.dumps(keyboard), "supports_streaming": "true",
+                    },
+                    files={"video": (video.name, handle, "video/mp4")},
+                    timeout=300,
+                )
+            response.raise_for_status()
+            sent = True
+        except httpx.HTTPError:
+            sent = False
+    if not sent:
+        response = httpx.post(
+            f"{api}/sendMessage",
+            json={"chat_id": chat, "text": caption, "reply_markup": keyboard},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+
+def process_telegram_callbacks(control: ControlPlane) -> None:
+    token, allowed_chat = os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not allowed_chat:
+        return
+    api = f"https://api.telegram.org/bot{token}"
+    response = httpx.get(
+        f"{api}/getUpdates",
+        params={"timeout": 0, "allowed_updates": json.dumps(["callback_query"])},
+        timeout=30,
+    )
+    response.raise_for_status()
+    updates = response.json().get("result", [])
+    if not updates:
+        return
+    for update in updates:
+        query = update.get("callback_query") or {}
+        query_id = query.get("id")
+        message = query.get("message") or {}
+        chat_id = str((message.get("chat") or {}).get("id", ""))
+        match = re.fullmatch(r"(approve|reject):(\d+):([0-9a-f]{16})", query.get("data") or "")
+        answer = "Diese Schaltfläche ist ungültig."
+        accepted = False
+        if query_id and chat_id == str(allowed_chat) and match:
+            action, episode_text, revision = match.groups()
+            episode_id = int(episode_text)
+            issue = control._request("GET", f"issues/{episode_id}")
+            episode = control._data(issue)
+            current_revision = (episode.get("package") or {}).get("revision")
+            if episode.get("status") != "awaiting_approval" or current_revision != revision:
+                answer = "Diese Prüffassung ist nicht mehr aktuell."
+            elif action == "approve":
+                control.update(
+                    episode_id,
+                    {"status": "approved_reserve", "approved_revision": revision},
+                    "awaiting_approval",
+                )
+                control.event("telegram_approved", episode_id, revision=revision)
+                answer, accepted = "Freigegeben – die Veröffentlichung wird automatisch geplant.", True
+            else:
+                control.update(
+                    episode_id,
+                    {"status": "rejected", "rejected_reason": "Über Telegram abgelehnt"},
+                    "awaiting_approval",
+                )
+                control.event("telegram_rejected", episode_id, revision=revision)
+                answer, accepted = "Abgelehnt – eine neue Fassung wird automatisch produziert.", True
+        if query_id:
+            httpx.post(
+                f"{api}/answerCallbackQuery",
+                json={"callback_query_id": query_id, "text": answer, "show_alert": False},
+                timeout=30,
+            ).raise_for_status()
+        if accepted and message.get("message_id"):
+            httpx.post(
+                f"{api}/editMessageReplyMarkup",
+                json={
+                    "chat_id": chat_id, "message_id": message["message_id"],
+                    "reply_markup": {"inline_keyboard": []},
+                },
+                timeout=30,
+            ).raise_for_status()
+            httpx.post(
+                f"{api}/sendMessage",
+                json={"chat_id": chat_id, "text": answer},
+                timeout=30,
+            ).raise_for_status()
+    newest = max(int(item["update_id"]) for item in updates)
+    httpx.get(f"{api}/getUpdates", params={"offset": newest + 1, "timeout": 0}, timeout=30).raise_for_status()
+
+
 def ollama_story(episode: dict[str, Any]) -> dict[str, Any]:
     CostGuard().require_free("ollama")
     prompt = f"""Du bist Headwriter einer deutschen Mystery-Hörspielserie.
@@ -463,20 +582,23 @@ def produce(control: ControlPlane) -> None:
             package = existing_package
         else:
             package = ollama_story(episode)
+        deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); voice = workdir / "voice.wav"; video = workdir / "episode.mp4"
             synthesize_voice(package["script"], voice)
             clips = create_krea_clips(package, workdir) if os.getenv("VISUAL_PROVIDER", "krea") == "krea" else None
             render_video(package, voice, video, workdir, clips)
             youtube_id = YouTube().upload_private(video, package)
-        deadline = datetime.now(timezone.utc) + timedelta(hours=72)
-        control.update(episode["id"], {
-            "title": package["title"], "script": package["script"], "package": package,
-            "preview_youtube_id": youtube_id, "approval_deadline": deadline.isoformat(),
-            "status": "awaiting_approval", "rejected_reason": "",
-        }, "producing")
-        control.event("approval_requested", episode["id"], deadline=deadline.isoformat(), youtube_id=youtube_id)
-        notify(f"Freigabe benötigt: {package['title']}", f"Prüffassung: https://youtu.be/{youtube_id}\nFrist: {deadline.isoformat()}")
+            control.update(episode["id"], {
+                "title": package["title"], "script": package["script"], "package": package,
+                "preview_youtube_id": youtube_id, "approval_deadline": deadline.isoformat(),
+                "status": "awaiting_approval", "rejected_reason": "",
+            }, "producing")
+            control.event("approval_requested", episode["id"], deadline=deadline.isoformat(), youtube_id=youtube_id)
+            try:
+                telegram_review(video, episode["id"], package, youtube_id, deadline)
+            except Exception as notify_error:
+                control.event("telegram_delivery_failed", episode["id"], error=repr(notify_error))
     except Exception as exc:
         control.update(episode["id"], {"status": "failed"}, "producing")
         control.event("production_failed", episode["id"], error=repr(exc))
@@ -501,6 +623,7 @@ def schedule_approved(control: ControlPlane) -> None:
 
 
 def tick(control: ControlPlane) -> None:
+    process_telegram_callbacks(control)
     schedule_approved(control)
     now = datetime.now(timezone.utc)
     for episode in control.episodes("awaiting_approval"):

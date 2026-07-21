@@ -1,7 +1,7 @@
 name: Schedule, reminders and controlling
 on:
   schedule:
-    - cron: "11 */6 * * *"
+    - cron: "*/30 * * * *"
     - cron: "43 7 * * *"
   workflow_dispatch:
 permissions:
