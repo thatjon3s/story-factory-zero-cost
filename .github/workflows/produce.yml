@@ -71,3 +71,6 @@ jobs:
           curl -fL -o voices/de_DE-thorsten_emotional-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx
           curl -fL -o voices/de_DE-thorsten_emotional-medium.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json
       - run: python zero_cost/worker.py produce
+      - name: Show local model diagnostics
+        if: failure()
+        run: tail -n 200 /tmp/ollama.log || true

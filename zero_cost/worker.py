@@ -324,9 +324,22 @@ Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
         "options": {"num_predict": 6000, "temperature": 0.8},
     }
     failures: list[str] = []
-    for attempt in range(3):
-        response = httpx.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=900)
-        response.raise_for_status()
+    for attempt in range(4):
+        try:
+            response = httpx.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=1200)
+            response.raise_for_status()
+        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+            detail = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                detail = exc.response.text[:500].replace("\n", " ")
+            failures.append(
+                f"attempt {attempt + 1}: {type(exc).__name__}"
+                + (f" ({detail})" if detail else "")
+            )
+            if attempt < 3:
+                time.sleep(20 * (attempt + 1))
+                continue
+            break
         try:
             package = json.loads(response.json()["response"])
             words = len(package["script"].split())
@@ -588,6 +601,13 @@ def produce(control: ControlPlane) -> None:
             package = existing_package
         else:
             package = ollama_story(episode)
+            control.update(episode["id"], {
+                "title": package["title"], "script": package["script"], "package": package,
+            }, "producing")
+            control.event(
+                "story_checkpointed", episode["id"],
+                revision=package["revision"], word_count=package["word_count"],
+            )
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); voice = workdir / "voice.wav"; video = workdir / "episode.mp4"
