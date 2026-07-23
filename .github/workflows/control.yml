@@ -6,7 +6,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  issues: write
 concurrency:
   group: story-control
   cancel-in-progress: false
@@ -16,14 +15,15 @@ jobs:
     runs-on: ubuntu-slim
     timeout-minutes: 10
     env:
-      GITHUB_TOKEN: ${{ github.token }}
       YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
       YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      MAX_EXTERNAL_MONTHLY_EUR: "0"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       ALLOW_PAID_API: "false"
+      MAX_EPISODE_COST_USD: "0"
       APP_TIMEZONE: Europe/Berlin
       PUBLISH_DAYS: "0,2,4"
       PUBLISH_TIME: "18:00"
