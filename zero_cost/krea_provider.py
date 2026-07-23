@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -41,33 +42,44 @@ class KreaClient:
 
     def character_reference(self, character_bible: str) -> str:
         prompt = (
-            "Vertical 9:16 cinematic casting photograph showing all recurring adult fictional characters. "
+            "Landscape 16:9 cinematic casting photograph showing all recurring adult fictional characters. "
             "Photorealistic natural skin, realistic anatomy, contemporary wardrobe, neutral full-body poses, "
             "each person visually distinct, no text, no logos. Character continuity sheet: " + character_bible
         )
-        return self._job(self.image_endpoint, {"prompt": prompt, "aspect_ratio": "9:16"})
+        return self._job(self.image_endpoint, {"prompt": prompt, "aspect_ratio": "16:9"})
 
     def scene_clip(self, scene: dict[str, str], character_bible: str, reference_url: str) -> str:
         still_url = self._job(self.image_endpoint, {
             "prompt": (
-                "Vertical 9:16 cinematic frame from an original dramatic series. The people must exactly match "
+                "Landscape 16:9 cinematic frame from an original dramatic series. The people must exactly match "
                 f"the reference image and this continuity description: {character_bible}. "
                 f"Visible human action: {scene['image_prompt']}. Photorealistic, natural facial expression, "
                 "correct hands, cinematic lighting, no text, no logos."
             ),
-            "aspect_ratio": "9:16",
+            "aspect_ratio": "16:9",
             "image_urls": [reference_url],
         })
         return self._job(self.video_endpoint, {
-            "prompt": (
-                f"The same human characters perform this action naturally: {scene['motion_prompt']}. "
-                "Preserve faces, clothing and location. Realistic body motion, cinematic camera, no morphing, no text."
-            ),
+            "prompt": self._motion_prompt(scene),
             "start_image": still_url,
             "duration": 6,
             "resolution": os.getenv("KREA_VIDEO_RESOLUTION", "720p"),
-            "aspect_ratio": "9:16",
+            "aspect_ratio": "16:9",
         })
+
+    @staticmethod
+    def _motion_prompt(scene: dict[str, Any]) -> str:
+        dialogue = " ".join(
+            f'{beat["speaker"]} says in German with {beat.get("emotion", "natural")} emotion: '
+            f'"{beat["text"]}"'
+            for beat in scene.get("dialogue", [])
+        )
+        return (
+            f"The same human characters perform this visible action naturally: {scene.get('action', '')}. "
+            f"Exact dialogue with accurate lip sync: {dialogue}. "
+            "No narrator, no voice-over and no additional speech. Preserve faces, voices, clothing and location. "
+            "Realistic body motion, cinematic camera, no morphing, no text."
+        )
 
     @staticmethod
     def download(url: str, destination: Path) -> None:
@@ -92,3 +104,28 @@ def create_krea_clips(package: dict[str, Any], workdir: Path) -> list[Path]:
         client.download(url, clip)
         clips.append(clip)
     return clips
+
+
+class KreaSceneAdapter:
+    """Official Krea API adapter; only enable it when the account terms and included quota permit automation."""
+
+    def __init__(self) -> None:
+        self.client = KreaClient()
+        self.references: dict[str, str] = {}
+
+    def generate(self, scene: dict[str, Any], package: dict[str, Any], destination: Path) -> None:
+        revision = package["revision"]
+        character_bible = json.dumps(package["character_bible"], ensure_ascii=False)
+        reference = self.references.get(revision)
+        if not reference:
+            reference = self.client.character_reference(character_bible)
+            self.references[revision] = reference
+        normalized = {
+            **scene,
+            "image_prompt": (
+                f"{scene['location']}. {scene['action']}. "
+                f"Camera: {scene['camera']}. Lighting: {scene['lighting']}."
+            ),
+        }
+        url = self.client.scene_clip(normalized, character_bible, reference)
+        self.client.download(url, destination)

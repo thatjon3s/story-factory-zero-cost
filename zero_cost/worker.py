@@ -18,8 +18,11 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cost_guard import CostGuard
-from fallback_provider import create_fallback_clips
-from krea_provider import create_krea_clips
+from krea_provider import KreaSceneAdapter
+from memory import SupabaseMemory, slugify
+from screenplay import finalize_package
+from studio_router import StudioRouter, SupabaseStudioQueue
+from supabase_control import SupabaseControlPlane
 
 
 TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Europe/Berlin"))
@@ -60,6 +63,9 @@ class ControlPlane:
             if name not in existing:
                 self._request("POST", "labels", json={"name": name, "color": color})
 
+    def get(self, episode_id: int) -> dict[str, Any]:
+        return self._data(self._request("GET", f"issues/{episode_id}"))
+
     @staticmethod
     def _body(row: dict[str, Any]) -> str:
         review = ""
@@ -98,15 +104,26 @@ class ControlPlane:
 
     def create_automatic_idea(self) -> dict[str, Any]:
         rows = self.episodes(limit=1000)
-        episode_no = max((int(row["episode_no"]) for row in rows), default=0) + 1
         series = os.getenv("AUTO_SERIES_NAME", "Die letzte Leitung")
+        universe = os.getenv("AUTO_UNIVERSE_NAME", "Story Factory Universe")
+        series_slug = slugify(series)
+        episode_no = max(
+            (
+                int(row["episode_no"])
+                for row in rows
+                if (row.get("series_slug") or slugify(row.get("series_name", ""))) == series_slug
+            ),
+            default=0,
+        ) + 1
         bible = os.getenv(
             "SERIES_BIBLE",
             "Eine nächtliche Notrufzentrale empfängt unmögliche Anrufe aus anderen Zeiten und Wirklichkeiten. "
             "Jede Folge löst ein eigenes Rätsel teilweise und erweitert zugleich das übergeordnete Geheimnis."
         )
         payload = {
-            "owner_id": self.owner_id, "series_name": series, "episode_no": episode_no,
+            "owner_id": self.owner_id, "universe_name": universe,
+            "universe_slug": slugify(universe), "series_name": series, "series_slug": series_slug,
+            "episode_no": episode_no,
             "title": f"Automatisch entwickelte Folge {episode_no}",
             "premise": f"{bible} Erfinde einen neuen Konflikt, der sich klar von früheren Folgen unterscheidet.",
         }
@@ -148,14 +165,7 @@ def notify(subject: str, body: str) -> None:
         )
         response.raise_for_status()
         return
-    github_token, repository = os.getenv("GITHUB_TOKEN", ""), os.getenv("GITHUB_REPOSITORY", "")
-    if github_token and repository:
-        response = httpx.post(
-            f"https://api.github.com/repos/{repository}/issues",
-            headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github+json"},
-            json={"title": subject[:240], "body": body}, timeout=30,
-        )
-        response.raise_for_status()
+    print(f"{subject}\n\n{body}", file=sys.stderr)
 
 
 def telegram_review(
@@ -175,15 +185,14 @@ def telegram_review(
     ]]}
     caption = (
         f"🎬 {package['title']}\n\n"
+        "Format: kanonisches 16:9-Hauptvideo\n"
+        f"Serie: {package.get('series_slug', 'unbekannt')}\n"
+        f"Generator: {package.get('visual_mode', 'unbekannt')}\n"
+        f"Token: {package.get('generation_token', package['revision'])}\n\n"
         f"Bitte bis {deadline.astimezone(TZ).strftime('%d.%m.%Y, %H:%M Uhr')} prüfen. "
         "Danach bleibt die Folge privat und eine Reservefolge übernimmt den Termin.\n"
         f"Vorschau: https://youtu.be/{youtube_id}"
     )
-    if package.get("visual_mode") == "fallback":
-        caption += (
-            "\n\n⚠️ Kostenlose Fallback-Generierung"
-            f"\nToken: {package['generation_token']}"
-        )
     api = f"https://api.telegram.org/bot{token}"
     sent = False
     max_bytes = int(os.getenv("TELEGRAM_MAX_VIDEO_MB", "49")) * 1024 * 1024
@@ -237,8 +246,7 @@ def process_telegram_callbacks(control: ControlPlane) -> None:
         if query_id and chat_id == str(allowed_chat) and match:
             action, episode_text, revision = match.groups()
             episode_id = int(episode_text)
-            issue = control._request("GET", f"issues/{episode_id}")
-            episode = control._data(issue)
+            episode = control.get(episode_id)
             current_revision = (episode.get("package") or {}).get("revision")
             if episode.get("status") != "awaiting_approval" or current_revision != revision:
                 answer = "Diese Prüffassung ist nicht mehr aktuell."
@@ -284,20 +292,28 @@ def process_telegram_callbacks(control: ControlPlane) -> None:
 
 def ollama_story(episode: dict[str, Any]) -> dict[str, Any]:
     CostGuard().require_free("ollama")
-    prompt = f"""Du bist Headwriter einer deutschen Mystery-Hörspielserie.
+    universe_slug = episode.get("universe_slug") or slugify(
+        episode.get("universe_name") or os.getenv("AUTO_UNIVERSE_NAME", "Story Factory Universe")
+    )
+    series_slug = episode.get("series_slug") or slugify(episode["series_name"])
+    canon = SupabaseMemory().context(universe_slug, series_slug)
+    prompt = f"""Du bist Showrunner einer deutschen seriellen Live-Action-Mysteryserie.
+Universum: {episode.get('universe_name', 'Story Factory Universe')}
 Serie: {episode['series_name']}, Folge {episode['episode_no']}.
 Prämisse: {episode['premise'] or episode['title']}.
 
-Schreibe eine originelle fiktionale Folge mit 1.350 bis 1.650 deutschen Wörtern. Sie benötigt einen sofortigen
-Cold Open, drei Eskalationen, eine beantwortete Teilfrage und am Ende einen präzisen Cliffhanger. Menschen müssen
-die Handlung sichtbar ausführen; keine abstrakten Symbolbilder. Definiere zwei bis vier wiederkehrende Figuren mit
-unveränderlichen Merkmalen und exakt acht filmische Schlüsselszenen. Keine realen Behauptungen, keine geschützten
-Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
-{{"title":"...","description":"...","thumbnail_text":"maximal 4 Wörter","tags":["..."],"script":"...",
-"character_bible":"Alter, Gesicht, Haare, Kleidung und Körperbau jeder Figur",
-"scenes":[{{"image_prompt":"Menschen, Ort, sichtbare Handlung, Kamera und Licht",
-"motion_prompt":"konkrete Körperbewegung, Reaktion und Kamerabewegung"}}]}}
-"""
+{canon.prompt_block()}
+
+Erstelle ein kausal geschlossenes Drehbuch für ein 16:9-Hauptvideo aus exakt acht Szenen zu je acht Sekunden.
+Es gibt keinen Erzähler, keine Voice-over-Stimme und keine erklärenden Texttafeln. Die Geschichte wird nur durch
+sichtbare Handlungen und kurze deutsche Dialoge erzählt. Jede Szene verändert den Zustand und folgt logisch aus der
+vorherigen. Niemand besitzt Wissen, das er nicht erworben hat. Wiederhole weder Informationen noch Formulierungen.
+Maximal zwei kurze Sätze pro Figur und Szene. Mindestens zwei Figuren sprechen.
+
+Baue Cold Open, steigenden Konflikt, eine Teilauflösung und einen präzisen visuellen Cliffhanger. Bewahre Gesichter,
+Alter, Haare, Kleidung und Stimme jeder Figur. `state_before` muss mit `state_after` der vorherigen Szene
+übereinstimmen. Schreibe am Ende eine knappe Episodenzusammenfassung und nur neue oder veränderte kanonische Fakten.
+Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib ausschließlich valides JSON zurück."""
     schema = {
         "type": "object",
         "properties": {
@@ -305,23 +321,80 @@ Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
             "description": {"type": "string"},
             "thumbnail_text": {"type": "string"},
             "tags": {"type": "array", "items": {"type": "string"}},
-            "script": {"type": "string"},
-            "character_bible": {"type": "string"},
+            "character_bible": {
+                "type": "array", "minItems": 2, "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}, "appearance": {"type": "string"},
+                        "wardrobe": {"type": "string"}, "voice": {"type": "string"},
+                    },
+                    "required": ["name", "appearance", "wardrobe", "voice"],
+                },
+            },
             "scenes": {
                 "type": "array", "minItems": 8, "maxItems": 8,
                 "items": {
                     "type": "object",
-                    "properties": {"image_prompt": {"type": "string"}, "motion_prompt": {"type": "string"}},
-                    "required": ["image_prompt", "motion_prompt"],
+                    "properties": {
+                        "duration_seconds": {"type": "integer", "enum": [8]},
+                        "location": {"type": "string"}, "action": {"type": "string"},
+                        "camera": {"type": "string"}, "lighting": {"type": "string"},
+                        "dialogue": {
+                            "type": "array", "minItems": 1, "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "speaker": {"type": "string"}, "emotion": {"type": "string"},
+                                    "text": {"type": "string"},
+                                },
+                                "required": ["speaker", "emotion", "text"],
+                            },
+                        },
+                        "state_before": {"type": "object"},
+                        "state_after": {"type": "object"},
+                    },
+                    "required": [
+                        "duration_seconds", "location", "action", "camera", "lighting",
+                        "dialogue", "state_before", "state_after",
+                    ],
                 },
             },
+            "memory_delta": {
+                "type": "object",
+                "properties": {
+                    "episode_summary": {"type": "string"},
+                    "resolved_threads": {"type": "array", "items": {"type": "string"}},
+                    "opened_threads": {"type": "array", "items": {"type": "string"}},
+                    "next_episode_hooks": {"type": "array", "items": {"type": "string"}},
+                    "canon_entries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "scope": {"type": "string", "enum": ["universe", "series"]},
+                                "key": {"type": "string"}, "summary": {"type": "string"},
+                                "importance": {"type": "integer", "minimum": 1, "maximum": 100},
+                            },
+                            "required": ["scope", "key", "summary", "importance"],
+                        },
+                    },
+                },
+                "required": [
+                    "episode_summary", "resolved_threads", "opened_threads",
+                    "next_episode_hooks", "canon_entries",
+                ],
+            },
         },
-        "required": ["title", "description", "thumbnail_text", "tags", "script", "character_bible", "scenes"],
+        "required": [
+            "title", "description", "thumbnail_text", "tags",
+            "character_bible", "scenes", "memory_delta",
+        ],
     }
     payload = {
         "model": os.getenv("OLLAMA_MODEL", "qwen3:4b"), "prompt": prompt, "stream": False,
         "format": schema, "think": False,
-        "options": {"num_predict": 6000, "temperature": 0.8},
+        "options": {"num_predict": 5000, "temperature": 0.65},
     }
     failures: list[str] = []
     for attempt in range(4):
@@ -342,16 +415,18 @@ Figuren, keine Imitation lebender Autoren. Gib ausschließlich JSON zurück:
             break
         try:
             package = json.loads(response.json()["response"])
-            words = len(package["script"].split())
-            if 1050 <= words <= 2000 and all(package.get(key) for key in schema["required"]):
-                revision = hashlib.sha256(package["script"].encode("utf-8")).hexdigest()[:16]
-                return {**package, "revision": revision, "generator": payload["model"], "word_count": words}
-            failures.append(f"attempt {attempt + 1}: {words} words")
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            failures.append(f"attempt {attempt + 1}: {type(exc).__name__}")
+            package.update({
+                "package_version": 2,
+                "universe_slug": universe_slug,
+                "series_slug": series_slug,
+                "generator": payload["model"],
+            })
+            return finalize_package(package)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            failures.append(f"attempt {attempt + 1}: {type(exc).__name__}: {exc}")
         payload["prompt"] += (
-            "\nDie vorige Ausgabe war ungültig oder zu kurz. Liefere mindestens 1.350 Wörter im Feld script, "
-            "ohne Vorrede und ohne Markdown; alle fünf JSON-Felder sind Pflicht."
+            "\nDie vorige Ausgabe hat die Logikprüfung nicht bestanden. Erzeuge das vollständige JSON neu. "
+            "Keine Wiederholungen, keine Zustandswidersprüche und kein Erzähler."
         )
     raise RuntimeError("Local story model failed validation: " + "; ".join(failures))
 
@@ -525,6 +600,27 @@ def render_video(
     ], check=True, timeout=3600)
 
 
+def render_dialogue_master(clips: list[Path], output: Path, workdir: Path) -> None:
+    """Join native-audio scenes into the canonical 16:9 master."""
+    CostGuard().require_free("ffmpeg")
+    if not clips:
+        raise RuntimeError("No dialogue scenes were generated")
+    concat = workdir / "dialogue-scenes.txt"
+    concat.write_text(
+        "\n".join(f"file '{clip.resolve().as_posix()}'" for clip in clips),
+        encoding="utf-8",
+    )
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
+        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,"
+               "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=24",
+        "-af", "loudnorm=I=-16:LRA=9:TP=-1.5",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
+    ], check=True, timeout=7200)
+
+
 class YouTube:
     scopes = [
         "https://www.googleapis.com/auth/youtube",
@@ -547,7 +643,11 @@ class YouTube:
         CostGuard().require_free("youtube")
         from googleapiclient.http import MediaFileUpload
         body = {"snippet": {
-            "title": package["title"][:100], "description": package["description"] + "\n\nFiktionale, KI-unterstützte Geschichte.",
+            "title": package["title"][:100],
+            "description": (
+                package["description"]
+                + "\n\nKanonische Folge einer fiktionalen, KI-unterstützten Serie."
+            ),
             "tags": package.get("tags", []), "categoryId": "24", "defaultLanguage": "de",
         }, "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}}
         request = self.service().videos().insert(
@@ -597,7 +697,7 @@ def produce(control: ControlPlane) -> None:
     control.update(episode["id"], {"status": "producing"}, episode["status"])
     try:
         existing_package = episode.get("package") or {}
-        if existing_package.get("script"):
+        if existing_package.get("package_version") == 2:
             package = existing_package
         else:
             package = ollama_story(episode)
@@ -606,29 +706,35 @@ def produce(control: ControlPlane) -> None:
             }, "producing")
             control.event(
                 "story_checkpointed", episode["id"],
-                revision=package["revision"], word_count=package["word_count"],
+                revision=package["revision"],
+                dialogue_words=len(package["script"].split()),
+                episode_summary=package["memory_delta"]["episode_summary"],
             )
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp); voice = workdir / "voice.wav"; video = workdir / "episode.mp4"
-            synthesize_voice(package["script"], voice)
-            clips = None
-            if os.getenv("VISUAL_PROVIDER", "krea") == "krea":
-                try:
-                    clips = create_krea_clips(package, workdir)
-                    package = {**package, "visual_mode": "krea", "generation_token": ""}
-                except Exception as krea_error:
-                    token = f"FALLBACK-{package['revision'][:8].upper()}"
-                    control.event(
-                        "visual_fallback_started", episode["id"],
-                        token=token, krea_error=repr(krea_error),
+            workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
+            queue = SupabaseStudioQueue()
+            queue.enqueue_package(package)
+            adapters = {}
+            if os.getenv("KREA_API_TOKEN", "").strip():
+                adapters["krea_api"] = KreaSceneAdapter()
+            router = StudioRouter(adapters, queue)
+            for _ in range(len(package["scenes"])):
+                if queue.completed_urls(package["revision"], len(package["scenes"])):
+                    break
+                result = router.work_once(package, workdir)
+                if result is None:
+                    raise RuntimeError(
+                        "No eligible zero-cost commercial studio is currently available. "
+                        "The queued scenes remain in Supabase."
                     )
-                    clips = create_fallback_clips(package, workdir, token)
-                    package = {
-                        **package, "visual_mode": "fallback", "generation_token": token,
-                        "visual_fallback_reason": type(krea_error).__name__,
-                    }
-            render_video(package, voice, video, workdir, clips)
+            clips = router.collect_package(package, workdir)
+            package = {
+                **package,
+                "visual_mode": "supabase-studio-router",
+                "generation_token": f"ROUTER-{package['revision'][:8].upper()}",
+            }
+            render_dialogue_master(clips, video, workdir)
             youtube_id = YouTube().upload_private(video, package)
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
@@ -658,6 +764,16 @@ def schedule_approved(control: ControlPlane) -> None:
         if episode["approved_revision"] != package.get("revision"):
             control.event("revision_mismatch", episode["id"])
             continue
+        if package.get("package_version") != 2:
+            control.event("legacy_master_blocked", episode["id"])
+            continue
+        SupabaseMemory().commit_approved_episode(episode)
+        control.event(
+            "canon_committed", episode["id"],
+            universe_slug=package["universe_slug"],
+            series_slug=package["series_slug"],
+            revision=package["revision"],
+        )
         YouTube().schedule(episode["preview_youtube_id"], slot)
         control.update(episode["id"], {"status": "scheduled", "planned_at": iso}, "approved_reserve")
         control.event("youtube_scheduled", episode["id"], planned_at=iso)
@@ -699,7 +815,9 @@ def metrics(control: ControlPlane) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics"]); args = parser.parse_args()
-    CostGuard(); control = ControlPlane(); control.ensure_labels()
+    CostGuard()
+    control = SupabaseControlPlane()
+    control.ensure_labels()
     {"produce": produce, "tick": tick, "metrics": metrics}[args.command](control)
 
 
