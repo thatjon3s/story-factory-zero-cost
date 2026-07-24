@@ -26,6 +26,8 @@ jobs:
       SCENE_LEASE_SECONDS: "7200"
       OLLAMA_MODEL: "qwen3:4b"
       PIPER_MODEL_PATH: "de_DE-thorsten-medium"
+      PIPER_DATA_DIR: "piper-voices"
+      RENDER_ARTIFACT_DIR: "render-artifacts"
       CC0_CHARACTER_ASSETS: "cc0-character-assets"
       PIPELINE_TARGET: "8"
       AUTO_UNIVERSE_NAME: ${{ vars.AUTO_UNIVERSE_NAME || 'Story Factory Universe' }}
@@ -46,6 +48,14 @@ jobs:
             "https://opengameart.org/sites/default/files/ultimate_animated_character_pack_by_quaternius.zip" \
             -o /tmp/cc0-characters.zip
           unzip -q /tmp/cc0-characters.zip -d cc0-character-assets
+          mkdir -p "$PIPER_DATA_DIR"
+          python -m piper.download_voices --data-dir "$PIPER_DATA_DIR" "$PIPER_MODEL_PATH"
+          test -s "$PIPER_DATA_DIR/$PIPER_MODEL_PATH.onnx"
+          test -s "$PIPER_DATA_DIR/$PIPER_MODEL_PATH.onnx.json"
+          printf 'Dies ist der automatische Stimmtest.' | \
+            piper --data-dir "$PIPER_DATA_DIR" --model "$PIPER_MODEL_PATH" \
+              --output_file /tmp/piper-smoke.wav
+          test -s /tmp/piper-smoke.wav
           curl -fsSL https://ollama.com/install.sh | sh
           ollama serve >/tmp/ollama.log 2>&1 &
           for attempt in $(seq 1 30); do
@@ -58,6 +68,14 @@ jobs:
         run: |
           set -o pipefail
           python zero_cost/worker.py produce 2>&1 | tee /tmp/story-factory.log
+      - name: Upload render for quality review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3d-render-review
+          path: render-artifacts/*.mp4
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Show local model diagnostics
         if: failure()
         run: |
