@@ -49,11 +49,15 @@ def _wav_duration(path: Path) -> float:
 
 def _voice_profile(character: dict[str, Any], index: int, emotion: str) -> tuple[float, float]:
     words = f"{character.get('voice', '')} {emotion}".lower()
-    pitch = 0.89 if any(x in words for x in ("tief", "bass", "bariton")) else 1.03
-    pitch *= (0.96, 1.05, 1.0, 1.09)[index % 4]
-    speed = 0.91 if any(x in words for x in ("ruhig", "leise", "traurig")) else 1.0
-    if any(x in words for x in ("panik", "wütend", "alarm", "aufgeregt")):
-        speed = 1.1
+    pitch = 0.90 if any(x in words for x in ("tief", "bass", "bariton", "warm")) else 1.06
+    pitch *= (0.94, 1.10, 1.01, 1.15)[index % 4]
+    speed = 0.94 if any(x in words for x in ("ruhig", "leise", "nachdenklich", "traurig")) else 1.06
+    if any(x in words for x in ("fröhlich", "begeistert", "neugierig", "aufgeregt", "lachend")):
+        speed = 1.15
+        pitch *= 1.04
+    if any(x in words for x in ("erschrocken", "wütend", "alarm", "empört")):
+        speed = 1.12
+        pitch *= 1.06
     return pitch, speed
 
 
@@ -64,7 +68,7 @@ def _speak(text: str, output: Path, character: dict[str, Any], index: int, emoti
         [
             "piper", "--data-dir", data_dir,
             "--model", os.getenv("PIPER_MODEL_PATH", "de_DE-thorsten-medium"),
-            "--output_file", str(raw), "--sentence_silence", "0.12",
+            "--output_file", str(raw), "--sentence_silence", "0.22",
         ],
         input=text, text=True, encoding="utf-8", check=True, timeout=300,
     )
@@ -73,7 +77,9 @@ def _speak(text: str, output: Path, character: dict[str, Any], index: int, emoti
         [
             "ffmpeg", "-y", "-i", str(raw), "-af",
             f"asetrate=22050*{pitch},aresample=48000,atempo={speed / pitch},"
-            "highpass=f=70,lowpass=f=10500,acompressor=threshold=-18dB:ratio=2.4",
+            "highpass=f=70,lowpass=f=12000,equalizer=f=2600:t=q:w=1.1:g=2.5,"
+            "acompressor=threshold=-20dB:ratio=2.8:attack=8:release=90,"
+            "alimiter=limit=0.92",
             "-c:a", "pcm_s16le", str(output),
         ],
         check=True, capture_output=True, timeout=300,
