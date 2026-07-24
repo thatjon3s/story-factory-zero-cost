@@ -18,10 +18,9 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cost_guard import CostGuard
-from krea_provider import KreaSceneAdapter
 from memory import SupabaseMemory, slugify
+from blender_renderer import render_blender_master
 from screenplay import finalize_package
-from studio_router import StudioRouter, SupabaseStudioQueue
 from supabase_control import SupabaseControlPlane
 
 
@@ -713,28 +712,12 @@ def produce(control: ControlPlane) -> None:
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
-            queue = SupabaseStudioQueue()
-            queue.enqueue_package(package)
-            adapters = {}
-            if os.getenv("KREA_API_TOKEN", "").strip():
-                adapters["krea_api"] = KreaSceneAdapter()
-            router = StudioRouter(adapters, queue)
-            for _ in range(len(package["scenes"])):
-                if queue.completed_urls(package["revision"], len(package["scenes"])):
-                    break
-                result = router.work_once(package, workdir)
-                if result is None:
-                    raise RuntimeError(
-                        "No eligible zero-cost commercial studio is currently available. "
-                        "The queued scenes remain in Supabase."
-                    )
-            clips = router.collect_package(package, workdir)
             package = {
                 **package,
-                "visual_mode": "supabase-studio-router",
-                "generation_token": f"ROUTER-{package['revision'][:8].upper()}",
+                "visual_mode": "open-source-3d-studio",
+                "generation_token": f"3D-CC0-{package['revision'][:8].upper()}",
             }
-            render_dialogue_master(clips, video, workdir)
+            render_blender_master(package, video, workdir)
             youtube_id = YouTube().upload_private(video, package)
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
