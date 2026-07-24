@@ -19,16 +19,14 @@ jobs:
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      KREA_API_TOKEN: ${{ secrets.KREA_API_TOKEN }}
-      KREA_IMAGE_ENDPOINT: "/generate/image/google/nano-banana"
-      KREA_VIDEO_ENDPOINT: "/generate/video/xai/grok-video-1.5"
-      KREA_VIDEO_RESOLUTION: "1080p"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       ALLOW_PAID_API: "false"
       MAX_EPISODE_COST_USD: "0"
       SCENE_LEASE_SECONDS: "7200"
       OLLAMA_MODEL: "qwen3:4b"
+      PIPER_MODEL_PATH: "de_DE-thorsten-medium"
+      CC0_CHARACTER_ASSETS: "cc0-character-assets"
       PIPELINE_TARGET: "8"
       AUTO_UNIVERSE_NAME: ${{ vars.AUTO_UNIVERSE_NAME || 'Story Factory Universe' }}
       AUTO_SERIES_NAME: ${{ vars.AUTO_SERIES_NAME || 'Die letzte Leitung' }}
@@ -42,7 +40,12 @@ jobs:
       - name: Install local story model and renderer
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg librsvg2-bin
+          sudo apt-get install -y ffmpeg librsvg2-bin blender unzip
+          mkdir -p cc0-character-assets
+          curl -fL --retry 4 \
+            "https://opengameart.org/sites/default/files/ultimate_animated_character_pack_by_quaternius.zip" \
+            -o /tmp/cc0-characters.zip
+          unzip -q /tmp/cc0-characters.zip -d cc0-character-assets
           curl -fsSL https://ollama.com/install.sh | sh
           ollama serve >/tmp/ollama.log 2>&1 &
           for attempt in $(seq 1 30); do
