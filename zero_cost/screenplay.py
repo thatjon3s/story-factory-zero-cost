@@ -6,6 +6,11 @@ from typing import Any
 
 
 ALLOWED_DURATIONS = {6, 8, 10}
+FAMILY_SETTINGS = ("spielplatz", "park", "schule", "garten", "see", "ufer", "ausflug", "wiese")
+FORBIDDEN_FAMILY_WORDS = (
+    "waffe", "pistole", "messer", "blut", "tot", "töten", "leiche",
+    "entführung", "horror", "dämon", "mord", "erpressung",
+)
 
 
 def transcript(package: dict[str, Any]) -> str:
@@ -30,12 +35,16 @@ def validate_screenplay(package: dict[str, Any]) -> list[str]:
     previous_after: dict[str, Any] | None = None
     total_duration = 0
     speakers: set[str] = set()
+    family_setting_scenes = 0
     for index, scene in enumerate(scenes, 1):
         duration = int(scene.get("duration_seconds", 0))
         total_duration += duration
         if duration not in ALLOWED_DURATIONS:
             errors.append(f"Scene {index}: duration must be 6, 8 or 10 seconds")
         dialogue = scene.get("dialogue") or []
+        location = str(scene.get("location", "")).lower()
+        if any(value in location for value in FAMILY_SETTINGS):
+            family_setting_scenes += 1
         if not dialogue:
             errors.append(f"Scene {index}: dialogue is required; narration is forbidden")
         spoken_words = 0
@@ -67,6 +76,16 @@ def validate_screenplay(package: dict[str, Any]) -> list[str]:
         errors.append(f"Master duration must be 48-120 seconds, got {total_duration}")
     if len(speakers) < 2:
         errors.append("At least two speaking characters are required")
+    if package.get("story_profile") == "social-kindness-v1":
+        if family_setting_scenes < len(scenes) // 2:
+            errors.append("At least half the scenes need a child/family-friendly everyday setting")
+        family_text = (
+            transcript(package) + " "
+            + " ".join(str(scene.get("action", "")) for scene in scenes)
+        ).lower()
+        forbidden = sorted(word for word in FORBIDDEN_FAMILY_WORDS if word in family_text)
+        if forbidden:
+            errors.append("Family profile forbids: " + ", ".join(forbidden))
 
     delta = package.get("memory_delta") or {}
     if not str(delta.get("episode_summary", "")).strip():
