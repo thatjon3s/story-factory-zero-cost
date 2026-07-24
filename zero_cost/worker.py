@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -718,6 +719,11 @@ def produce(control: ControlPlane) -> None:
                 "generation_token": f"3D-CC0-{package['revision'][:8].upper()}",
             }
             render_blender_master(package, video, workdir)
+            artifact_dir = os.getenv("RENDER_ARTIFACT_DIR")
+            if artifact_dir:
+                artifact_path = Path(artifact_dir)
+                artifact_path.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(video, artifact_path / "episode-master-16x9.mp4")
             youtube_id = YouTube().upload_private(video, package)
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
