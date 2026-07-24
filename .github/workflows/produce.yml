@@ -42,7 +42,9 @@ jobs:
       - name: Install local story model and renderer
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg librsvg2-bin blender unzip
+          sudo apt-get install -y \
+            ffmpeg librsvg2-bin blender unzip \
+            libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 mesa-vulkan-drivers
           mkdir -p cc0-character-assets
           curl -fL --retry 4 \
             "https://opengameart.org/sites/default/files/ultimate_animated_character_pack_by_quaternius.zip" \
