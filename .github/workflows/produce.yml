@@ -3,6 +3,12 @@ on:
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
+    inputs:
+      quality_preview:
+        description: "Nur eine kurze 3D-Szene rendern (kein Upload, keine Datenbankänderung)"
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -28,6 +34,7 @@ jobs:
       PIPER_MODEL_PATH: "de_DE-thorsten-medium"
       PIPER_DATA_DIR: "piper-voices"
       RENDER_ARTIFACT_DIR: "render-artifacts"
+      QUALITY_PREVIEW: ${{ inputs.quality_preview || 'false' }}
       CC0_CHARACTER_ASSETS: "cc0-character-assets"
       PIPELINE_TARGET: "8"
       AUTO_UNIVERSE_NAME: ${{ vars.AUTO_UNIVERSE_NAME || 'Story Factory Universe' }}
@@ -58,28 +65,34 @@ jobs:
             piper --data-dir "$PIPER_DATA_DIR" --model "$PIPER_MODEL_PATH" \
               --output_file /tmp/piper-smoke.wav
           test -s /tmp/piper-smoke.wav
-          for attempt in $(seq 1 5); do
-            if curl -fsSL --retry 4 --retry-all-errors \
-              https://ollama.com/install.sh -o /tmp/install-ollama.sh &&
-              sh /tmp/install-ollama.sh &&
-              command -v ollama >/dev/null; then
-              break
-            fi
-            echo "Ollama installation attempt $attempt failed; retrying..."
-            sleep $((attempt * 10))
-          done
-          command -v ollama >/dev/null
-          ollama serve >/tmp/ollama.log 2>&1 &
-          for attempt in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:11434/api/tags >/dev/null && break
-            sleep 2
-          done
-          curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
-          ollama pull "$OLLAMA_MODEL"
+          if [ "$QUALITY_PREVIEW" != "true" ]; then
+            for attempt in $(seq 1 5); do
+              if curl -fsSL --retry 4 --retry-all-errors \
+                https://ollama.com/install.sh -o /tmp/install-ollama.sh &&
+                sh /tmp/install-ollama.sh &&
+                command -v ollama >/dev/null; then
+                break
+              fi
+              echo "Ollama installation attempt $attempt failed; retrying..."
+              sleep $((attempt * 10))
+            done
+            command -v ollama >/dev/null
+            ollama serve >/tmp/ollama.log 2>&1 &
+            for attempt in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:11434/api/tags >/dev/null && break
+              sleep 2
+            done
+            curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
+            ollama pull "$OLLAMA_MODEL"
+          fi
       - name: Produce video
         run: |
           set -o pipefail
-          python zero_cost/worker.py produce 2>&1 | tee /tmp/story-factory.log
+          if [ "$QUALITY_PREVIEW" = "true" ]; then
+            python zero_cost/worker.py preview 2>&1 | tee /tmp/story-factory.log
+          else
+            python zero_cost/worker.py produce 2>&1 | tee /tmp/story-factory.log
+          fi
       - name: Upload render for quality review
         if: always()
         uses: actions/upload-artifact@v4
