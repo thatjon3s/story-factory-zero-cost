@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,10 +19,9 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cost_guard import CostGuard
-from krea_provider import KreaSceneAdapter
 from memory import SupabaseMemory, slugify
+from blender_renderer import render_blender_master
 from screenplay import finalize_package
-from studio_router import StudioRouter, SupabaseStudioQueue
 from supabase_control import SupabaseControlPlane
 
 
@@ -713,28 +713,17 @@ def produce(control: ControlPlane) -> None:
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
-            queue = SupabaseStudioQueue()
-            queue.enqueue_package(package)
-            adapters = {}
-            if os.getenv("KREA_API_TOKEN", "").strip():
-                adapters["krea_api"] = KreaSceneAdapter()
-            router = StudioRouter(adapters, queue)
-            for _ in range(len(package["scenes"])):
-                if queue.completed_urls(package["revision"], len(package["scenes"])):
-                    break
-                result = router.work_once(package, workdir)
-                if result is None:
-                    raise RuntimeError(
-                        "No eligible zero-cost commercial studio is currently available. "
-                        "The queued scenes remain in Supabase."
-                    )
-            clips = router.collect_package(package, workdir)
             package = {
                 **package,
-                "visual_mode": "supabase-studio-router",
-                "generation_token": f"ROUTER-{package['revision'][:8].upper()}",
+                "visual_mode": "open-source-3d-studio",
+                "generation_token": f"3D-CC0-{package['revision'][:8].upper()}",
             }
-            render_dialogue_master(clips, video, workdir)
+            render_blender_master(package, video, workdir)
+            artifact_dir = os.getenv("RENDER_ARTIFACT_DIR")
+            if artifact_dir:
+                artifact_path = Path(artifact_dir)
+                artifact_path.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(video, artifact_path / "episode-master-16x9.mp4")
             youtube_id = YouTube().upload_private(video, package)
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
@@ -813,9 +802,40 @@ def metrics(control: ControlPlane) -> None:
         except Exception as exc: control.event("analytics_failed", episode["id"], error=repr(exc))
 
 
+def quality_preview() -> None:
+    package = {
+        "title": "Qualitätstest: Das Signal",
+        "character_bible": [
+            {"name": "Mara", "voice": "ruhig, tief, kontrolliert"},
+            {"name": "Noah", "voice": "angespannt, direkt"},
+        ],
+        "scenes": [{
+            "duration_seconds": 8,
+            "location": "nächtliche Leitstelle",
+            "action": "Mara friert vor dem flackernden Monitor ein. Noah tritt näher, während die Raumbeleuchtung aussetzt.",
+            "camera": "langsamer Push-in, dann Gegenschuss",
+            "lighting": "kaltes Monitorlicht, harte Schatten",
+            "dialogue": [
+                {"speaker": "Noah", "emotion": "angespannt", "text": "Mara ... warum sendet der tote Kanal wieder?"},
+                {"speaker": "Mara", "emotion": "leise entschlossen", "text": "Weil jemand auf der anderen Seite weiß, dass wir zuhören."},
+            ],
+        }],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        video = workdir / "quality-preview-16x9.mp4"
+        render_blender_master(package, video, workdir)
+        artifact_dir = Path(os.getenv("RENDER_ARTIFACT_DIR", "render-artifacts"))
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(video, artifact_dir / video.name)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics"]); args = parser.parse_args()
+    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics", "preview"]); args = parser.parse_args()
     CostGuard()
+    if args.command == "preview":
+        quality_preview()
+        return
     control = SupabaseControlPlane()
     control.ensure_labels()
     {"produce": produce, "tick": tick, "metrics": metrics}[args.command](control)
