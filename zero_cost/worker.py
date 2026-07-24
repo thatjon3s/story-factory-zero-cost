@@ -802,9 +802,40 @@ def metrics(control: ControlPlane) -> None:
         except Exception as exc: control.event("analytics_failed", episode["id"], error=repr(exc))
 
 
+def quality_preview() -> None:
+    package = {
+        "title": "Qualitätstest: Das Signal",
+        "character_bible": [
+            {"name": "Mara", "voice": "ruhig, tief, kontrolliert"},
+            {"name": "Noah", "voice": "angespannt, direkt"},
+        ],
+        "scenes": [{
+            "duration_seconds": 8,
+            "location": "nächtliche Leitstelle",
+            "action": "Mara friert vor dem flackernden Monitor ein. Noah tritt näher, während die Raumbeleuchtung aussetzt.",
+            "camera": "langsamer Push-in, dann Gegenschuss",
+            "lighting": "kaltes Monitorlicht, harte Schatten",
+            "dialogue": [
+                {"speaker": "Noah", "emotion": "angespannt", "text": "Mara ... warum sendet der tote Kanal wieder?"},
+                {"speaker": "Mara", "emotion": "leise entschlossen", "text": "Weil jemand auf der anderen Seite weiß, dass wir zuhören."},
+            ],
+        }],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        video = workdir / "quality-preview-16x9.mp4"
+        render_blender_master(package, video, workdir)
+        artifact_dir = Path(os.getenv("RENDER_ARTIFACT_DIR", "render-artifacts"))
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(video, artifact_dir / video.name)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics"]); args = parser.parse_args()
+    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics", "preview"]); args = parser.parse_args()
     CostGuard()
+    if args.command == "preview":
+        quality_preview()
+        return
     control = SupabaseControlPlane()
     control.ensure_labels()
     {"produce": produce, "tick": tick, "metrics": metrics}[args.command](control)
