@@ -10,13 +10,19 @@ from puppet_renderer import build_dialogue_track
 
 
 def _asset_manifest(root: Path, destination: Path) -> list[str]:
+    human_terms = ("human", "person", "male", "female", "woman", "man", "girl", "boy", "kid", "casual")
+
+    def human_score(path: Path) -> tuple[int, int]:
+        label = " ".join(part.lower() for part in path.parts)
+        return (sum(term in label for term in human_terms), path.stat().st_size)
+
     candidates = sorted(
         (
             path for path in root.rglob("*.fbx")
             if path.stat().st_size > 50_000
             and not any(word in path.name.lower() for word in ("weapon", "sword", "axe", "gun", "shield"))
         ),
-        key=lambda path: path.stat().st_size,
+        key=human_score,
         reverse=True,
     )
     if len(candidates) < 2:
