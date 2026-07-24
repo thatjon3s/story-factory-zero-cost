@@ -57,6 +57,15 @@ def test_repeated_dialogue_is_rejected():
     assert any("repeated dialogue" in error for error in validate_screenplay(value))
 
 
+def test_family_profile_rejects_dark_topics_and_wrong_settings():
+    value = finalize_package(package())
+    value["story_profile"] = "social-kindness-v1"
+    value["scenes"][0]["action"] = "Mara findet eine Waffe."
+    errors = validate_screenplay(value)
+    assert any("child/family-friendly" in error for error in errors)
+    assert any("Family profile forbids" in error for error in errors)
+
+
 def test_memory_prompt_weights_series_as_its_own_section():
     context = CanonContext(
         universe=[{"summary": "Zeitreisen erzeugen keine Parallelwelten."}],
