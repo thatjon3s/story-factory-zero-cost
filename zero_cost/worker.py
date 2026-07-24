@@ -297,7 +297,7 @@ def ollama_story(episode: dict[str, Any]) -> dict[str, Any]:
     )
     series_slug = episode.get("series_slug") or slugify(episode["series_name"])
     canon = SupabaseMemory().context(universe_slug, series_slug)
-    prompt = f"""Du bist Showrunner einer deutschen seriellen Live-Action-Mysteryserie.
+    prompt = f"""Du bist Showrunner einer warmen, modernen deutschen Animationsserie für Kinder und Familien.
 Universum: {episode.get('universe_name', 'Story Factory Universe')}
 Serie: {episode['series_name']}, Folge {episode['episode_no']}.
 Prämisse: {episode['premise'] or episode['title']}.
@@ -310,10 +310,21 @@ sichtbare Handlungen und kurze deutsche Dialoge erzählt. Jede Szene verändert 
 vorherigen. Niemand besitzt Wissen, das er nicht erworben hat. Wiederhole weder Informationen noch Formulierungen.
 Maximal zwei kurze Sätze pro Figur und Szene. Mindestens zwei Figuren sprechen.
 
-Baue Cold Open, steigenden Konflikt, eine Teilauflösung und einen präzisen visuellen Cliffhanger. Bewahre Gesichter,
-Alter, Haare, Kleidung und Stimme jeder Figur. `state_before` muss mit `state_after` der vorherigen Szene
-übereinstimmen. Schreibe am Ende eine knappe Episodenzusammenfassung und nur neue oder veränderte kanonische Fakten.
-Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib ausschließlich valides JSON zurück."""
+Der Alltag ist freundlich, farbenfroh und sicher. Bevorzugte Settings sind Spielplatz, Park, Schule, Garten,
+Seeufer, Ausflug und gemeinsames Spielen. Der Konflikt ist klein, sozial und emotional glaubwürdig: jemand fühlt
+sich übergangen, ein Spielzeug wird nicht geteilt, ein Missverständnis entsteht, eine Erinnerung wird unterschiedlich
+erzählt oder jemand muss Mut zum Entschuldigen finden. Keine Gewalt, Bedrohung, Horror, Waffen, Tod, Kriminalität,
+dunkle Mystery, gefährliche Mutproben oder erwachsene Beziehungskonflikte.
+
+Jede Folge braucht einen sofort verständlichen Wunsch, eine kleine sozial spannende Spitze, einen konkreten Versuch
+der Figuren, eine faire Lösung durch Zuhören oder Zusammenarbeit und einen heiteren letzten Haken. Dialoge klingen
+gesprochen, lebhaft und altersgerecht; nutze Reaktionen, Freude, Überraschung, zögernde Pausen und Humor statt
+Erklärsätzen. Figuren dürfen widersprechen, bleiben aber respektvoll. Die Moral wird gezeigt, niemals ausgesprochen.
+
+Bewahre menschennahe Gesichter, sichtbare Frisuren und Hände sowie farbige, klar unterscheidbare Kleidung jeder Figur.
+`state_before` muss mit `state_after` der vorherigen Szene übereinstimmen. Schreibe am Ende eine knappe
+Episodenzusammenfassung und nur neue oder veränderte kanonische Fakten. Universumsfakten nur, wenn sie tatsächlich
+serienübergreifend gelten. Gib ausschließlich valides JSON zurück."""
     schema = {
         "type": "object",
         "properties": {
@@ -417,6 +428,7 @@ Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib auss
             package = json.loads(response.json()["response"])
             package.update({
                 "package_version": 2,
+                "story_profile": "social-kindness-v1",
                 "universe_slug": universe_slug,
                 "series_slug": series_slug,
                 "generator": payload["model"],
@@ -697,7 +709,10 @@ def produce(control: ControlPlane) -> None:
     control.update(episode["id"], {"status": "producing"}, episode["status"])
     try:
         existing_package = episode.get("package") or {}
-        if existing_package.get("package_version") == 2:
+        if (
+            existing_package.get("package_version") == 2
+            and existing_package.get("story_profile") == "social-kindness-v1"
+        ):
             package = existing_package
         else:
             package = ollama_story(episode)
@@ -804,20 +819,20 @@ def metrics(control: ControlPlane) -> None:
 
 def quality_preview() -> None:
     package = {
-        "title": "Qualitätstest: Das Signal",
+        "title": "Qualitätstest: Die rote Schaufel",
         "character_bible": [
-            {"name": "Mara", "voice": "ruhig, tief, kontrolliert"},
-            {"name": "Noah", "voice": "angespannt, direkt"},
+            {"name": "Mia", "voice": "hell, fröhlich, neugierig"},
+            {"name": "Noah", "voice": "warm, lebhaft, freundlich"},
         ],
         "scenes": [{
             "duration_seconds": 8,
-            "location": "nächtliche Leitstelle",
-            "action": "Mara friert vor dem flackernden Monitor ein. Noah tritt näher, während die Raumbeleuchtung aussetzt.",
-            "camera": "langsamer Push-in, dann Gegenschuss",
-            "lighting": "kaltes Monitorlicht, harte Schatten",
+            "location": "sonniger Spielplatz",
+            "action": "Mia hält die rote Schaufel fest. Noah zeigt auf die riesige gemeinsame Sandburg.",
+            "camera": "lebendige Halbnahe, dann freundlicher Gegenschuss",
+            "lighting": "warmes, helles Nachmittagslicht",
             "dialogue": [
-                {"speaker": "Noah", "emotion": "angespannt", "text": "Mara ... warum sendet der tote Kanal wieder?"},
-                {"speaker": "Mara", "emotion": "leise entschlossen", "text": "Weil jemand auf der anderen Seite weiß, dass wir zuhören."},
+                {"speaker": "Mia", "emotion": "zögernd", "text": "Aber ... ich hatte die Schaufel zuerst!"},
+                {"speaker": "Noah", "emotion": "begeistert", "text": "Stimmt! Und zusammen bauen wir den höchsten Turm!"},
             ],
         }],
     }
