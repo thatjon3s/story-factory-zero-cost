@@ -59,9 +59,11 @@ def _voice_profile(character: dict[str, Any], index: int, emotion: str) -> tuple
 
 def _speak(text: str, output: Path, character: dict[str, Any], index: int, emotion: str) -> None:
     raw = output.with_suffix(".raw.wav")
+    data_dir = os.getenv("PIPER_DATA_DIR", ".")
     subprocess.run(
         [
-            "piper", "--model", os.getenv("PIPER_MODEL_PATH", "de_DE-thorsten-medium"),
+            "piper", "--data-dir", data_dir,
+            "--model", os.getenv("PIPER_MODEL_PATH", "de_DE-thorsten-medium"),
             "--output_file", str(raw), "--sentence_silence", "0.12",
         ],
         input=text, text=True, encoding="utf-8", check=True, timeout=300,
