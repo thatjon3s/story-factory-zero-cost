@@ -56,7 +56,17 @@ jobs:
             piper --data-dir "$PIPER_DATA_DIR" --model "$PIPER_MODEL_PATH" \
               --output_file /tmp/piper-smoke.wav
           test -s /tmp/piper-smoke.wav
-          curl -fsSL https://ollama.com/install.sh | sh
+          for attempt in $(seq 1 5); do
+            if curl -fsSL --retry 4 --retry-all-errors \
+              https://ollama.com/install.sh -o /tmp/install-ollama.sh &&
+              sh /tmp/install-ollama.sh &&
+              command -v ollama >/dev/null; then
+              break
+            fi
+            echo "Ollama installation attempt $attempt failed; retrying..."
+            sleep $((attempt * 10))
+          done
+          command -v ollama >/dev/null
           ollama serve >/tmp/ollama.log 2>&1 &
           for attempt in $(seq 1 30); do
             curl -fsS http://127.0.0.1:11434/api/tags >/dev/null && break
