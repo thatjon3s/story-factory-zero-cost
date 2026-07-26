@@ -211,9 +211,16 @@ def _extract_background(source: Path, destination: Path) -> None:
         )
     ]
     background = tuple(sorted(channel)[len(samples) // 2] for channel in zip(*samples))
+    green_screen = background[1] > max(background[0], background[2]) + 60
 
     def distance(pixel: tuple[int, int, int, int]) -> float:
         return sum((pixel[index] - background[index]) ** 2 for index in range(3)) ** .5
+
+    def background_match(pixel: tuple[int, int, int, int]) -> bool:
+        if green_screen:
+            return pixel[1] > 110 and pixel[1] - max(pixel[0], pixel[2]) > 24
+        low, high = min(pixel[:3]), max(pixel[:3])
+        return low > 155 and high - low < 75
 
     source_pixels = image.load()
     connected = bytearray(width * height)
@@ -225,7 +232,7 @@ def _extract_background(source: Path, destination: Path) -> None:
     while queue:
         x, y = queue.popleft()
         offset = y * width + x
-        if connected[offset] or distance(source_pixels[x, y]) > 115:
+        if connected[offset] or not background_match(source_pixels[x, y]):
             continue
         connected[offset] = 1
         if x:
@@ -241,15 +248,31 @@ def _extract_background(source: Path, destination: Path) -> None:
     rgb = image.load()
     for y in range(height):
         for x in range(width):
+            if green_screen:
+                dominance = rgb[x, y][1] - max(rgb[x, y][0], rgb[x, y][2])
+                if rgb[x, y][1] > 135 and dominance > 55:
+                    pixels.append(max(0, min(255, round(255 - (dominance - 18) * 5.5))))
+                    continue
             if not connected[y * width + x]:
                 pixels.append(255)
                 continue
-            delta = distance(rgb[x, y])
-            pixels.append(max(0, min(255, round((delta - 20) * 3.0))))
+            if green_screen:
+                dominance = rgb[x, y][1] - max(rgb[x, y][0], rgb[x, y][2])
+                pixels.append(max(0, min(255, round(255 - (dominance - 12) * 5.2))))
+            else:
+                delta = distance(rgb[x, y])
+                pixels.append(max(0, min(255, round((delta - 18) * 3.4))))
     alpha = Image.new("L", image.size)
     alpha.putdata(pixels)
     alpha = alpha.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(.55))
     image.putalpha(alpha)
+    if green_screen:
+        cleaned = []
+        for red, green, blue, opacity in image.getdata():
+            if 0 < opacity < 255:
+                green = min(green, max(red, blue) + 12)
+            cleaned.append((red, green, blue, opacity))
+        image.putdata(cleaned)
     bbox = alpha.getbbox()
     if not bbox:
         raise RuntimeError("Generated character contains no extractable foreground")
