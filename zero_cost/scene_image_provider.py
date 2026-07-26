@@ -176,7 +176,10 @@ def _download_image(url: str, destination: Path) -> None:
 
 
 def _validate_image(path: Path, expected_ratio: float = 16 / 9) -> None:
-    if path.stat().st_size < 100_000:
+    # Clean studio plates and isolated portrait assets compress much more efficiently
+    # than detailed landscape scenes. Decode and resolution checks below are the
+    # authoritative quality gate; this only rejects obvious error payloads.
+    if path.stat().st_size < 20_000:
         raise RuntimeError(f"Generated image is suspiciously small: {path.stat().st_size} bytes")
     with Image.open(path) as image:
         width, height = image.size
