@@ -869,8 +869,16 @@ def quality_preview() -> None:
     package = {
         "title": "Qualitätstest: Die rote Schaufel",
         "character_bible": [
-            {"name": "Mia", "voice": "hell, fröhlich, neugierig"},
-            {"name": "Noah", "voice": "warm, lebhaft, freundlich"},
+            {
+                "name": "Mia", "voice": "hell, fröhlich, neugierig",
+                "appearance": "seven-year-old girl, warm brown skin, expressive brown eyes, dark curly hair in two puff ponytails",
+                "wardrobe": "sunflower-yellow dungarees over a coral red T-shirt, turquoise trainers",
+            },
+            {
+                "name": "Noah", "voice": "warm, lebhaft, freundlich",
+                "appearance": "eight-year-old boy, fair skin with freckles, expressive green eyes, tousled auburn hair",
+                "wardrobe": "cobalt-blue hoodie, moss-green shorts, orange trainers",
+            },
         ],
         "scenes": [
             {
@@ -878,6 +886,15 @@ def quality_preview() -> None:
                 "location": "sonniger Spielplatz",
                 "action": "Mia hält die rote Schaufel hoch. Noah zeigt auf die gemeinsame Sandburg.",
                 "camera": "lebendige Halbnahe", "lighting": "warmes Nachmittagslicht",
+                "visual_prompt": (
+                    "Premium contemporary European children's-book animation frame, painterly cinematic depth. "
+                    "A sunny modern playground. Mia, a seven-year-old girl with warm brown skin, expressive brown "
+                    "eyes and dark curly hair in two puff ponytails, wears sunflower-yellow dungarees over a coral "
+                    "T-shirt and turquoise trainers. She holds a bright red shovel close to her chest, hesitant "
+                    "but curious. Noah, an eight-year-old freckled boy with green eyes and tousled auburn hair, "
+                    "wears a cobalt hoodie, moss-green shorts and orange trainers; he points excitedly toward "
+                    "their half-built sandcastle. Cinematic medium two-shot, natural faces and hands, no text."
+                ),
                 "dialogue": [
                     {"speaker": "Mia", "emotion": "zögernd", "text": "Ich wollte den Turm allein fertig bauen."},
                     {"speaker": "Noah", "emotion": "begeistert", "text": "Und ich habe eine riesige Idee!"},
@@ -888,6 +905,14 @@ def quality_preview() -> None:
                 "location": "sonniger Spielplatz",
                 "action": "Mia reicht Noah die rote Schaufel. Gemeinsam bauen sie den höchsten Turm.",
                 "camera": "freundlicher Gegenschuss", "lighting": "goldenes Nachmittagslicht",
+                "visual_prompt": (
+                    "Premium contemporary European children's-book animation frame, painterly cinematic depth. "
+                    "The same sunny modern playground and exactly the same children and clothing. Mia smiles as "
+                    "she hands the bright red shovel to Noah across their detailed sandcastle. Noah accepts it "
+                    "with a delighted grin while both kneel beside a tall new sand tower. Golden afternoon rim "
+                    "light, cinematic friendly reverse angle, natural hands, energetic body language, strong "
+                    "spatial continuity with the previous scene, no text or logo."
+                ),
                 "dialogue": [
                     {"speaker": "Mia", "emotion": "fröhlich", "text": "Du schaufelst, ich klopfe fest!"},
                     {"speaker": "Noah", "emotion": "lachend", "text": "Abgemacht — Bauteam Blitz!"},
@@ -899,11 +924,15 @@ def quality_preview() -> None:
         workdir = Path(tmp)
         video = workdir / "quality-preview-16x9.mp4"
         contact_sheet = workdir / "storyboard-contact-sheet.jpg"
-        quality = render_contact_sheet(package, contact_sheet)
+        scene_images, image_provider = generate_scene_images(package, workdir)
+        if not scene_images:
+            raise RuntimeError(f"Dynamic preview received no generated images: {image_provider}")
+        print(f"SCENE_IMAGE_PROVIDER={image_provider}; GENERATED_SCENES={len(scene_images)}")
+        quality = render_contact_sheet(package, contact_sheet, scene_images)
         print(f"STORYBOARD_QUALITY={json.dumps(quality)}")
         if quality["mean_saturation"] < 45 or quality["mean_scene_difference"] < 2.0:
             raise RuntimeError(f"Storyboard quality gate failed: {quality}")
-        render_puppet_master(package, video, workdir)
+        render_puppet_master(package, video, workdir, scene_images)
         artifact_dir = Path(os.getenv("RENDER_ARTIFACT_DIR", "render-artifacts"))
         artifact_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(video, artifact_dir / video.name)
