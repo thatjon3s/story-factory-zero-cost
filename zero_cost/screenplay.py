@@ -6,6 +6,21 @@ from typing import Any
 
 
 ALLOWED_DURATIONS = {6, 8, 10}
+FAMILY_SETTINGS = ("spielplatz", "park", "schule", "garten", "see", "ufer", "ausflug", "wiese")
+FORBIDDEN_FAMILY_WORDS = (
+    "waffe", "pistole", "messer", "blut", "tot", "töten", "leiche",
+    "entführung", "horror", "dämon", "mord", "erpressung",
+)
+ILLUSTRATED_PROPS = ("schaufel", "ball", "papierboot", "picknickkorb")
+FAMILY_BEATS = (
+    "wunsch", "hindernis", "reaktion", "versuch",
+    "rueckschlag", "verstehen", "loesung", "schlussgag",
+)
+VISIBLE_ACTION_WORDS = (
+    "kommt", "geht", "läuft", "hält", "zeigt", "nimmt", "gibt", "reicht",
+    "legt", "stellt", "setzt", "spielt", "baut", "versteckt", "findet",
+    "öffnet", "dreht", "rollt", "fährt", "winkt", "lacht", "schaut",
+)
 
 
 def transcript(package: dict[str, Any]) -> str:
@@ -30,12 +45,28 @@ def validate_screenplay(package: dict[str, Any]) -> list[str]:
     previous_after: dict[str, Any] | None = None
     total_duration = 0
     speakers: set[str] = set()
+    family_setting_scenes = 0
+    family_beats: list[str] = []
+    prop_history: set[str] = set()
     for index, scene in enumerate(scenes, 1):
         duration = int(scene.get("duration_seconds", 0))
         total_duration += duration
         if duration not in ALLOWED_DURATIONS:
             errors.append(f"Scene {index}: duration must be 6, 8 or 10 seconds")
         dialogue = scene.get("dialogue") or []
+        location = str(scene.get("location", "")).lower()
+        if any(value in location for value in FAMILY_SETTINGS):
+            family_setting_scenes += 1
+        if package.get("story_profile") in {"social-kindness-v2", "social-kindness-v3"}:
+            family_beats.append(str(scene.get("beat", "")).strip().lower())
+            props = {str(value).strip().lower() for value in (scene.get("props") or []) if str(value).strip()}
+            action_text = str(scene.get("action", "")).lower()
+            if not any(word in action_text for word in VISIBLE_ACTION_WORDS):
+                errors.append(f"Scene {index}: action is not visibly renderable")
+            for prop in prop_history:
+                if prop in action_text and prop not in props:
+                    errors.append(f"Scene {index}: referenced prop '{prop}' is missing from props")
+            prop_history |= props
         if not dialogue:
             errors.append(f"Scene {index}: dialogue is required; narration is forbidden")
         spoken_words = 0
@@ -67,6 +98,41 @@ def validate_screenplay(package: dict[str, Any]) -> list[str]:
         errors.append(f"Master duration must be 48-120 seconds, got {total_duration}")
     if len(speakers) < 2:
         errors.append("At least two speaking characters are required")
+    if package.get("story_profile") in {"social-kindness-v1", "social-kindness-v2", "social-kindness-v3"}:
+        if family_setting_scenes < len(scenes) // 2:
+            errors.append("At least half the scenes need a child/family-friendly everyday setting")
+        family_text = (
+            transcript(package) + " "
+            + " ".join(str(scene.get("action", "")) for scene in scenes)
+        ).lower()
+        forbidden = sorted(word for word in FORBIDDEN_FAMILY_WORDS if word in family_text)
+        if forbidden:
+            errors.append("Family profile forbids: " + ", ".join(forbidden))
+    if package.get("story_profile") in {"social-kindness-v2", "social-kindness-v3"}:
+        if tuple(family_beats) != FAMILY_BEATS:
+            errors.append(
+                "Family story beats must be exactly: " + ", ".join(FAMILY_BEATS)
+            )
+        actions = [
+            re.sub(r"\W+", " ", str(scene.get("action", "")).lower()).strip()
+            for scene in scenes
+        ]
+        for index, action in enumerate(actions):
+            action_words = set(action.split())
+            for prior in actions[:index]:
+                prior_words = set(prior.split())
+                union = action_words | prior_words
+                if union and len(action_words & prior_words) / len(union) > .78:
+                    errors.append(f"Scene {index + 1}: action is too similar to an earlier scene")
+                    break
+    if package.get("story_profile") == "social-kindness-v3":
+        if speakers != {"Mia", "Noah"}:
+            errors.append("Illustrated v3 episodes must use exactly the fixed cast Mia and Noah")
+        for index, scene in enumerate(scenes, 1):
+            for prop in scene.get("props") or []:
+                normalized = str(prop).lower().replace(" ", "-")
+                if not any(allowed in normalized for allowed in ILLUSTRATED_PROPS):
+                    errors.append(f"Scene {index}: unsupported illustrated prop: {prop}")
 
     delta = package.get("memory_delta") or {}
     if not str(delta.get("episode_summary", "")).strip():
