@@ -296,13 +296,24 @@ def _illustrated_asset(name: str) -> Image.Image:
     return Image.open(path).convert("RGBA")
 
 
+@lru_cache(maxsize=16)
+def _external_asset(path: str) -> Image.Image:
+    return Image.open(path).convert("RGBA")
+
+
 def _cover_asset(image: Image.Image, width: int, height: int) -> Image.Image:
     factor = max(width / image.width, height / image.height)
     return image.resize((round(image.width * factor), round(image.height * factor)), Image.Resampling.LANCZOS)
 
 
-def _illustrated_background(scene_index: int, time: float) -> Image.Image:
-    source = _cover_asset(_illustrated_asset("playground-lake.png"), 1440, 810)
+def _illustrated_background(
+    scene_index: int, time: float, generated_scene: Path | None = None
+) -> Image.Image:
+    source_image = (
+        _external_asset(str(generated_scene.resolve()))
+        if generated_scene is not None else _illustrated_asset("playground-lake.png")
+    )
+    source = _cover_asset(source_image, 1440, 810)
     progress = (math.sin(time * .16 + scene_index * 1.7) + 1) / 2
     if scene_index % 2:
         progress = 1 - progress
@@ -409,10 +420,11 @@ def _wrap(text: str, width: int = 48):
 
 
 def render_storyboard_frame(
-    package: dict[str, Any], scene_index: int, time: float, cue: DialogueCue | None = None
+    package: dict[str, Any], scene_index: int, time: float, cue: DialogueCue | None = None,
+    scene_image: Path | None = None,
 ) -> Image.Image:
     scene = package["scenes"][scene_index]
-    frame = _illustrated_background(scene_index, time)
+    frame = _illustrated_background(scene_index, time, scene_image)
     draw = ImageDraw.Draw(frame, "RGBA")
     characters = package.get("character_bible") or []
     shot = scene_index % 4
@@ -421,7 +433,7 @@ def render_storyboard_frame(
         (WIDTH*.24, WIDTH*.64), (WIDTH*.38, WIDTH*.67),
     )[shot]
     heights = (475, 535, 430, 510)
-    for index, character in enumerate(characters[:2]):
+    for index, character in enumerate(characters[:2] if scene_image is None else []):
         name = str(character.get("name", "Mia" if index == 0 else "Noah"))
         speaking = bool(cue and cue.speaker == name)
         pose = _select_pose(scene, cue, name, scene_index)
@@ -434,7 +446,7 @@ def render_storyboard_frame(
             heights[shot], time, speaking, index * 1.8,
         )
     props = scene.get("props") or []
-    if props and not any(
+    if scene_image is None and props and not any(
         word in str(scene.get("action", "")).lower()
         for word in ("teil", "reich", "gibt", "nimmt")
     ):
@@ -461,14 +473,19 @@ def render_storyboard_frame(
     return frame
 
 
-def render_contact_sheet(package: dict[str, Any], destination: Path) -> dict[str, float]:
+def render_contact_sheet(
+    package: dict[str, Any], destination: Path, scene_images: list[Path] | None = None
+) -> dict[str, float]:
     frames = []
     for index, scene in enumerate(package["scenes"]):
         cues = [
             DialogueCue(str(d["speaker"]), str(d["text"]), str(d.get("emotion", "")), 0, 8)
             for d in scene.get("dialogue", [])
         ]
-        frame = render_storyboard_frame(package, index, 3.0, cues[0] if cues else None)
+        scene_image = scene_images[index] if scene_images else None
+        frame = render_storyboard_frame(
+            package, index, 3.0, cues[0] if cues else None, scene_image
+        )
         frames.append(frame.convert("RGB").resize((480, 270)))
     sheet = Image.new("RGB", (960, math.ceil(len(frames)/2)*270), "white")
     for index, frame in enumerate(frames):
@@ -485,7 +502,10 @@ def render_contact_sheet(package: dict[str, Any], destination: Path) -> dict[str
     }
 
 
-def render_puppet_master(package: dict[str, Any], output: Path, workdir: Path) -> None:
+def render_puppet_master(
+    package: dict[str, Any], output: Path, workdir: Path,
+    scene_images: list[Path] | None = None,
+) -> None:
     audio, cue_sets, durations = build_dialogue_track(package, workdir)
     process = subprocess.Popen(
         [
@@ -502,7 +522,8 @@ def render_puppet_master(package: dict[str, Any], output: Path, workdir: Path) -
             for frame_index in range(round(duration * FPS)):
                 time = frame_index / FPS
                 cue = _active_cue(cues, time)
-                frame = render_storyboard_frame(package, scene_index, time, cue)
+                scene_image = scene_images[scene_index] if scene_images else None
+                frame = render_storyboard_frame(package, scene_index, time, cue, scene_image)
                 if not process.stdin:
                     raise RuntimeError("FFmpeg frame pipe closed")
                 process.stdin.write(frame.tobytes())
