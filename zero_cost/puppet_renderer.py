@@ -11,7 +11,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import httpx
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 
@@ -63,62 +62,13 @@ def _voice_profile(character: dict[str, Any], index: int, emotion: str) -> tuple
     return pitch, speed
 
 
-def _performance_direction(character: dict[str, Any], emotion: str) -> str:
-    voice = str(character.get("voice", "warm, lebhaft"))
-    feeling = emotion or "aufmerksam und natürlich"
-    return (
-        "Sprich den deutschen Satz wie in einer hochwertigen, modernen Kinder-Animationsserie. "
-        f"Stimmprofil: {voice}. Aktuelle Emotion: {feeling}. "
-        "Spiele die Emotion deutlich, aber glaubwürdig; reagiere auf den Gesprächspartner, "
-        "setze natürliche Mikro-Pausen und betone wichtige Wörter. Kein Vorleseton, "
-        "keine Werbung, kein Erzähler, nicht überdrehen."
-    )
-
-
-def _pollinations_speak(
-    text: str, raw: Path, character: dict[str, Any], index: int, emotion: str
-) -> bool:
-    key = os.getenv("POLLINATIONS_API_KEY", "")
-    if not key:
-        return False
-    voices = [
-        value.strip() for value in os.getenv(
-            "POLLINATIONS_TTS_VOICES", "nova,onyx,coral,echo"
-        ).split(",") if value.strip()
-    ]
-    _, speed = _voice_profile(character, index, emotion)
-    try:
-        response = httpx.post(
-            "https://gen.pollinations.ai/v1/audio/speech",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": os.getenv("POLLINATIONS_TTS_MODEL", "qwen-tts-instruct"),
-                "input": text,
-                "voice": voices[index % len(voices)],
-                "response_format": "wav",
-                "speed": round(max(.86, min(1.18, speed)), 2),
-                "instruct": _performance_direction(character, emotion),
-                "seed": _seed(f"{character.get('name', index)}:{text}") % 2_147_483_647,
-            },
-            timeout=300,
-        )
-        response.raise_for_status()
-        if len(response.content) < 1_000:
-            raise RuntimeError("AI speech response was unexpectedly small")
-        raw.write_bytes(response.content)
-        return True
-    except (httpx.HTTPError, RuntimeError) as exc:
-        print(f"AI speech primary unavailable, using neural fallback: {exc}")
-        return False
-
-
 def _edge_speak(
     text: str, raw: Path, character: dict[str, Any], index: int, emotion: str
 ) -> None:
     voices = [
         value.strip() for value in os.getenv(
             "EDGE_TTS_VOICES",
-            "de-DE-SeraphinaMultilingualNeural,de-DE-FlorianMultilingualNeural,"
+            "de-DE-SeraphinaMultilingualNeural,de-DE-ConradNeural,"
             "de-DE-KatjaNeural,de-DE-ConradNeural",
         ).split(",") if value.strip()
     ]
@@ -140,10 +90,10 @@ def _edge_speak(
 
 def _speak(text: str, output: Path, character: dict[str, Any], index: int, emotion: str) -> None:
     raw = output.with_suffix(".raw.audio")
-    provider = "pollinations-qwen"
-    if not _pollinations_speak(text, raw, character, index, emotion):
-        provider = "edge-neural"
-        _edge_speak(text, raw, character, index, emotion)
+    # Edge's hosted neural synthesis is unmetered and requires no paid API key.
+    # The emotion-specific performance is controlled per line above.
+    provider = "edge-neural"
+    _edge_speak(text, raw, character, index, emotion)
     print(f"TTS_PROVIDER={provider} character={character.get('name', index)}")
     subprocess.run(
         [
