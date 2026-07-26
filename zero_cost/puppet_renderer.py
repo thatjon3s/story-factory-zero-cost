@@ -342,6 +342,13 @@ def _illustrated_sprite(character: str, pose: str) -> Image.Image:
     return cell.crop(bbox) if bbox else cell
 
 
+@lru_cache(maxsize=32)
+def _generated_sprite(path: str) -> Image.Image:
+    image = Image.open(path).convert("RGBA")
+    bbox = image.getchannel("A").getbbox()
+    return image.crop(bbox) if bbox else image
+
+
 @lru_cache(maxsize=8)
 def _illustrated_prop(kind: str) -> Image.Image:
     sheet = _illustrated_asset("props.png")
@@ -422,6 +429,7 @@ def _wrap(text: str, width: int = 48):
 def render_storyboard_frame(
     package: dict[str, Any], scene_index: int, time: float, cue: DialogueCue | None = None,
     scene_image: Path | None = None,
+    character_images: dict[str, Path] | None = None,
 ) -> Image.Image:
     scene = package["scenes"][scene_index]
     frame = _illustrated_background(scene_index, time, scene_image)
@@ -433,16 +441,28 @@ def render_storyboard_frame(
         (WIDTH*.24, WIDTH*.64), (WIDTH*.38, WIDTH*.67),
     )[shot]
     heights = (475, 535, 430, 510)
-    for index, character in enumerate(characters[:2] if scene_image is None else []):
+    interaction = any(
+        word in str(scene.get("action", "")).lower()
+        for word in ("teil", "reich", "gibt", "nimmt", "gemeinsam", "hilft", "umarm")
+    )
+    for index, character in enumerate(characters[:2]):
         name = str(character.get("name", "Mia" if index == 0 else "Noah"))
         speaking = bool(cue and cue.speaker == name)
         pose = _select_pose(scene, cue, name, scene_index)
         x = positions[index]
+        if interaction:
+            progress = min(1.0, time / max(1.0, float(scene.get("duration_seconds", 8)) * .55))
+            x += (55 if index == 0 else -55) * (1 - math.cos(progress * math.pi)) / 2
         if pose == "walk":
             entrance = math.sin(min(1.0, time / 1.4) * math.pi / 2)
             x += (entrance - 1) * (180 if index == 0 else -180)
+        sprite_path = (character_images or {}).get(name)
+        sprite = (
+            _generated_sprite(str(sprite_path.resolve()))
+            if sprite_path is not None else _illustrated_sprite(name, pose)
+        )
         _composite_character(
-            frame, _illustrated_sprite(name, pose), x, HEIGHT*.81,
+            frame, sprite, x, HEIGHT*.81,
             heights[shot], time, speaking, index * 1.8,
         )
     props = scene.get("props") or []
@@ -474,7 +494,8 @@ def render_storyboard_frame(
 
 
 def render_contact_sheet(
-    package: dict[str, Any], destination: Path, scene_images: list[Path] | None = None
+    package: dict[str, Any], destination: Path, scene_images: list[Path] | None = None,
+    character_images: dict[str, Path] | None = None,
 ) -> dict[str, float]:
     frames = []
     for index, scene in enumerate(package["scenes"]):
@@ -484,7 +505,7 @@ def render_contact_sheet(
         ]
         scene_image = scene_images[index] if scene_images else None
         frame = render_storyboard_frame(
-            package, index, 3.0, cues[0] if cues else None, scene_image
+            package, index, 3.0, cues[0] if cues else None, scene_image, character_images
         )
         frames.append(frame.convert("RGB").resize((480, 270)))
     sheet = Image.new("RGB", (960, math.ceil(len(frames)/2)*270), "white")
@@ -505,6 +526,7 @@ def render_contact_sheet(
 def render_puppet_master(
     package: dict[str, Any], output: Path, workdir: Path,
     scene_images: list[Path] | None = None,
+    character_images: dict[str, Path] | None = None,
 ) -> None:
     audio, cue_sets, durations = build_dialogue_track(package, workdir)
     process = subprocess.Popen(
@@ -523,7 +545,9 @@ def render_puppet_master(
                 time = frame_index / FPS
                 cue = _active_cue(cues, time)
                 scene_image = scene_images[scene_index] if scene_images else None
-                frame = render_storyboard_frame(package, scene_index, time, cue, scene_image)
+                frame = render_storyboard_frame(
+                    package, scene_index, time, cue, scene_image, character_images
+                )
                 if not process.stdin:
                     raise RuntimeError("FFmpeg frame pipe closed")
                 process.stdin.write(frame.tobytes())
