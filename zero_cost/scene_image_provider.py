@@ -28,13 +28,14 @@ ENVIRONMENT_STYLE_LOCK = (
 
 
 def background_prompt(scene: dict[str, Any], package: dict[str, Any]) -> str:
-    props = ", ".join(str(prop) for prop in scene.get("props", [])) or "appropriate story props"
     return (
         f"{ENVIRONMENT_STYLE_LOCK} Empty establishing-shot environment plate before the actors "
-        f"arrive. Setting: {scene.get('location', '')}. Arrange these objects naturally: {props}. "
+        f"arrive. Setting: {scene.get('location', '')}. "
         f"Camera: {scene.get('camera', '')}. "
         f"Lighting: {scene.get('lighting', '')}. Leave clear open foreground space for two "
-        "separately composited animated characters. The location is completely deserted."
+        "separately composited animated characters. The location is completely deserted. "
+        "Absolutely no people, children, figures, silhouettes, faces, toys, shovels, balls, "
+        "boats, baskets or oversized foreground objects anywhere in the image."
     )
 
 
@@ -323,7 +324,8 @@ def generate_visual_assets(
                 model=os.getenv("POLLINATIONS_BACKGROUND_MODEL", "zimage"),
                 negative_prompt=(
                     "people, person, child, children, boy, girl, man, woman, human, face, body, "
-                    "crowd, silhouette, character, animal, portrait, mannequin"
+                    "crowd, silhouette, character, animal, portrait, mannequin, toy, shovel, "
+                    "spade, ball, boat, basket, oversized object, giant object, foreground object"
                 ),
             )
         else:
