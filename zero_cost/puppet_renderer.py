@@ -560,7 +560,10 @@ def render_puppet_master(
         [
             "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{WIDTH}x{HEIGHT}",
             "-r", str(FPS), "-i", "-", "-i", str(audio), "-map", "0:v", "-map", "1:a",
-            "-vf", "scale=1920:1080:flags=lanczos", "-c:v", "libx264", "-preset", "slow",
+            "-vf",
+            "minterpolate=fps=48:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
+            "scale=1920:1080:flags=lanczos",
+            "-c:v", "libx264", "-preset", "slow",
             "-crf", "17", "-profile:v", "high", "-level:v", "4.2",
             "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", "-shortest", str(output),
@@ -586,15 +589,18 @@ def render_puppet_master(
         probe = subprocess.run(
             [
                 "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height,pix_fmt", "-of", "json", str(output),
+                "-show_entries", "stream=width,height,pix_fmt,r_frame_rate",
+                "-of", "json", str(output),
             ],
             check=True, capture_output=True, text=True, timeout=120,
         )
         stream = json.loads(probe.stdout)["streams"][0]
-        if (stream.get("width"), stream.get("height"), stream.get("pix_fmt")) != (
-            1920, 1080, "yuv420p",
+        if (
+            (stream.get("width"), stream.get("height"), stream.get("pix_fmt"))
+            != (1920, 1080, "yuv420p")
+            or stream.get("r_frame_rate") != "48/1"
         ):
-            raise RuntimeError(f"Final master is not validated 1080p yuv420p: {stream}")
+            raise RuntimeError(f"Final master is not validated 1080p 48fps yuv420p: {stream}")
     except Exception:
         process.kill()
         raise
