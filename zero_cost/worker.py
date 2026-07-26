@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,10 +19,9 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cost_guard import CostGuard
-from krea_provider import KreaSceneAdapter
 from memory import SupabaseMemory, slugify
+from puppet_renderer import render_contact_sheet, render_puppet_master
 from screenplay import finalize_package
-from studio_router import StudioRouter, SupabaseStudioQueue
 from supabase_control import SupabaseControlPlane
 
 
@@ -104,7 +104,7 @@ class ControlPlane:
 
     def create_automatic_idea(self) -> dict[str, Any]:
         rows = self.episodes(limit=1000)
-        series = os.getenv("AUTO_SERIES_NAME", "Die letzte Leitung")
+        series = os.getenv("AUTO_SERIES_NAME", "Gemeinsam ist mehr los")
         universe = os.getenv("AUTO_UNIVERSE_NAME", "Story Factory Universe")
         series_slug = slugify(series)
         episode_no = max(
@@ -297,7 +297,7 @@ def ollama_story(episode: dict[str, Any]) -> dict[str, Any]:
     )
     series_slug = episode.get("series_slug") or slugify(episode["series_name"])
     canon = SupabaseMemory().context(universe_slug, series_slug)
-    prompt = f"""Du bist Showrunner einer deutschen seriellen Live-Action-Mysteryserie.
+    prompt = f"""Du bist Showrunner einer warmen, modernen deutschen Animationsserie für Kinder und Familien.
 Universum: {episode.get('universe_name', 'Story Factory Universe')}
 Serie: {episode['series_name']}, Folge {episode['episode_no']}.
 Prämisse: {episode['premise'] or episode['title']}.
@@ -310,10 +310,28 @@ sichtbare Handlungen und kurze deutsche Dialoge erzählt. Jede Szene verändert 
 vorherigen. Niemand besitzt Wissen, das er nicht erworben hat. Wiederhole weder Informationen noch Formulierungen.
 Maximal zwei kurze Sätze pro Figur und Szene. Mindestens zwei Figuren sprechen.
 
-Baue Cold Open, steigenden Konflikt, eine Teilauflösung und einen präzisen visuellen Cliffhanger. Bewahre Gesichter,
-Alter, Haare, Kleidung und Stimme jeder Figur. `state_before` muss mit `state_after` der vorherigen Szene
-übereinstimmen. Schreibe am Ende eine knappe Episodenzusammenfassung und nur neue oder veränderte kanonische Fakten.
-Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib ausschließlich valides JSON zurück."""
+Der Alltag ist freundlich, farbenfroh und sicher. Bevorzugte Settings sind Spielplatz, Park, Schule, Garten,
+Seeufer, Ausflug und gemeinsames Spielen. Der Konflikt ist klein, sozial und emotional glaubwürdig: jemand fühlt
+sich übergangen, ein Spielzeug wird nicht geteilt, ein Missverständnis entsteht, eine Erinnerung wird unterschiedlich
+erzählt oder jemand muss Mut zum Entschuldigen finden. Keine Gewalt, Bedrohung, Horror, Waffen, Tod, Kriminalität,
+dunkle Mystery, gefährliche Mutproben oder erwachsene Beziehungskonflikte.
+
+Jede Folge braucht einen sofort verständlichen Wunsch, eine kleine sozial spannende Spitze, einen konkreten Versuch
+der Figuren, eine faire Lösung durch Zuhören oder Zusammenarbeit und einen heiteren letzten Haken. Dialoge klingen
+gesprochen, lebhaft und altersgerecht; nutze Reaktionen, Freude, Überraschung, zögernde Pausen und Humor statt
+Erklärsätzen. Figuren dürfen widersprechen, bleiben aber respektvoll. Die Moral wird gezeigt, niemals ausgesprochen.
+
+Bewahre menschennahe Gesichter, sichtbare Frisuren und Hände sowie farbige, klar unterscheidbare Kleidung jeder Figur.
+`state_before` muss mit `state_after` der vorherigen Szene übereinstimmen. Schreibe am Ende eine knappe
+Episodenzusammenfassung und nur neue oder veränderte kanonische Fakten. Universumsfakten nur, wenn sie tatsächlich
+serienübergreifend gelten.
+
+Die acht Szenen tragen in dieser Reihenfolge exakt diese `beat`-Werte:
+wunsch, hindernis, reaktion, versuch, rueckschlag, verstehen, loesung, schlussgag.
+`props` enthält jedes sichtbare und erwähnte Handlungsobjekt der Szene. Ein Objekt bleibt in den Folgeszenen
+vorhanden, solange es nicht sichtbar weggelegt oder mitgenommen wird. Jede `action` beschreibt eine körperlich
+sichtbare Handlung mit einem eindeutigen Verb. Gedanken, Erklärungen und Zustände allein sind keine Handlung.
+Gib ausschließlich valides JSON zurück."""
     schema = {
         "type": "object",
         "properties": {
@@ -338,6 +356,11 @@ Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib auss
                     "type": "object",
                     "properties": {
                         "duration_seconds": {"type": "integer", "enum": [8]},
+                        "beat": {"type": "string", "enum": [
+                            "wunsch", "hindernis", "reaktion", "versuch",
+                            "rueckschlag", "verstehen", "loesung", "schlussgag",
+                        ]},
+                        "props": {"type": "array", "items": {"type": "string"}},
                         "location": {"type": "string"}, "action": {"type": "string"},
                         "camera": {"type": "string"}, "lighting": {"type": "string"},
                         "dialogue": {
@@ -355,7 +378,7 @@ Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib auss
                         "state_after": {"type": "object"},
                     },
                     "required": [
-                        "duration_seconds", "location", "action", "camera", "lighting",
+                        "duration_seconds", "beat", "props", "location", "action", "camera", "lighting",
                         "dialogue", "state_before", "state_after",
                     ],
                 },
@@ -417,6 +440,7 @@ Universumsfakten nur, wenn sie tatsächlich serienübergreifend gelten. Gib auss
             package = json.loads(response.json()["response"])
             package.update({
                 "package_version": 2,
+                "story_profile": "social-kindness-v2",
                 "universe_slug": universe_slug,
                 "series_slug": series_slug,
                 "generator": payload["model"],
@@ -685,7 +709,15 @@ def next_slots(count: int) -> list[datetime]:
 
 
 def produce(control: ControlPlane) -> None:
-    candidates = control.episodes("idea", 1) or control.episodes("failed", 1) or control.episodes("rejected", 1)
+    target_series = slugify(os.getenv("AUTO_SERIES_NAME", "Gemeinsam ist mehr los"))
+    candidates: list[dict[str, Any]] = []
+    for status in ("idea", "failed", "rejected"):
+        candidates = [
+            row for row in control.episodes(status)
+            if row.get("series_slug") == target_series
+        ][:1]
+        if candidates:
+            break
     if not candidates:
         active = sum(len(control.episodes(status)) for status in ("producing", "awaiting_approval", "approved_reserve", "scheduled"))
         if active >= PIPELINE_TARGET:
@@ -697,7 +729,10 @@ def produce(control: ControlPlane) -> None:
     control.update(episode["id"], {"status": "producing"}, episode["status"])
     try:
         existing_package = episode.get("package") or {}
-        if existing_package.get("package_version") == 2:
+        if (
+            existing_package.get("package_version") == 2
+            and existing_package.get("story_profile") == "social-kindness-v2"
+        ):
             package = existing_package
         else:
             package = ollama_story(episode)
@@ -713,28 +748,25 @@ def produce(control: ControlPlane) -> None:
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
-            queue = SupabaseStudioQueue()
-            queue.enqueue_package(package)
-            adapters = {}
-            if os.getenv("KREA_API_TOKEN", "").strip():
-                adapters["krea_api"] = KreaSceneAdapter()
-            router = StudioRouter(adapters, queue)
-            for _ in range(len(package["scenes"])):
-                if queue.completed_urls(package["revision"], len(package["scenes"])):
-                    break
-                result = router.work_once(package, workdir)
-                if result is None:
-                    raise RuntimeError(
-                        "No eligible zero-cost commercial studio is currently available. "
-                        "The queued scenes remain in Supabase."
-                    )
-            clips = router.collect_package(package, workdir)
             package = {
                 **package,
-                "visual_mode": "supabase-studio-router",
-                "generation_token": f"ROUTER-{package['revision'][:8].upper()}",
+                "visual_mode": "controlled-2d-cutout-v2",
+                "generation_token": f"2D-CUTOUT-{package['revision'][:8].upper()}",
             }
-            render_dialogue_master(clips, video, workdir)
+            contact_sheet = workdir / "storyboard-contact-sheet.jpg"
+            quality = render_contact_sheet(package, contact_sheet)
+            if quality["mean_saturation"] < 45:
+                raise RuntimeError(f"Storyboard quality gate: colors are too weak ({quality})")
+            if quality["mean_scene_difference"] < 2.0:
+                raise RuntimeError(f"Storyboard quality gate: scenes are too repetitive ({quality})")
+            control.event("storyboard_quality_passed", episode["id"], **quality)
+            render_puppet_master(package, video, workdir)
+            artifact_dir = os.getenv("RENDER_ARTIFACT_DIR")
+            if artifact_dir:
+                artifact_path = Path(artifact_dir)
+                artifact_path.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(video, artifact_path / "episode-master-16x9.mp4")
+                shutil.copy2(contact_sheet, artifact_path / contact_sheet.name)
             youtube_id = YouTube().upload_private(video, package)
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
@@ -813,9 +845,57 @@ def metrics(control: ControlPlane) -> None:
         except Exception as exc: control.event("analytics_failed", episode["id"], error=repr(exc))
 
 
+def quality_preview() -> None:
+    package = {
+        "title": "Qualitätstest: Die rote Schaufel",
+        "character_bible": [
+            {"name": "Mia", "voice": "hell, fröhlich, neugierig"},
+            {"name": "Noah", "voice": "warm, lebhaft, freundlich"},
+        ],
+        "scenes": [
+            {
+                "duration_seconds": 8, "beat": "wunsch", "props": ["rote Schaufel"],
+                "location": "sonniger Spielplatz",
+                "action": "Mia hält die rote Schaufel hoch. Noah zeigt auf die gemeinsame Sandburg.",
+                "camera": "lebendige Halbnahe", "lighting": "warmes Nachmittagslicht",
+                "dialogue": [
+                    {"speaker": "Mia", "emotion": "zögernd", "text": "Ich wollte den Turm allein fertig bauen."},
+                    {"speaker": "Noah", "emotion": "begeistert", "text": "Und ich habe eine riesige Idee!"},
+                ],
+            },
+            {
+                "duration_seconds": 8, "beat": "loesung", "props": ["rote Schaufel"],
+                "location": "sonniger Spielplatz",
+                "action": "Mia reicht Noah die rote Schaufel. Gemeinsam bauen sie den höchsten Turm.",
+                "camera": "freundlicher Gegenschuss", "lighting": "goldenes Nachmittagslicht",
+                "dialogue": [
+                    {"speaker": "Mia", "emotion": "fröhlich", "text": "Du schaufelst, ich klopfe fest!"},
+                    {"speaker": "Noah", "emotion": "lachend", "text": "Abgemacht — Bauteam Blitz!"},
+                ],
+            },
+        ],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        video = workdir / "quality-preview-16x9.mp4"
+        contact_sheet = workdir / "storyboard-contact-sheet.jpg"
+        quality = render_contact_sheet(package, contact_sheet)
+        print(f"STORYBOARD_QUALITY={json.dumps(quality)}")
+        if quality["mean_saturation"] < 45 or quality["mean_scene_difference"] < 2.0:
+            raise RuntimeError(f"Storyboard quality gate failed: {quality}")
+        render_puppet_master(package, video, workdir)
+        artifact_dir = Path(os.getenv("RENDER_ARTIFACT_DIR", "render-artifacts"))
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(video, artifact_dir / video.name)
+        shutil.copy2(contact_sheet, artifact_dir / contact_sheet.name)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics"]); args = parser.parse_args()
+    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=["produce", "tick", "metrics", "preview"]); args = parser.parse_args()
     CostGuard()
+    if args.command == "preview":
+        quality_preview()
+        return
     control = SupabaseControlPlane()
     control.ensure_labels()
     {"produce": produce, "tick": tick, "metrics": metrics}[args.command](control)
