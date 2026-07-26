@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import httpx
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 
@@ -62,32 +63,93 @@ def _voice_profile(character: dict[str, Any], index: int, emotion: str) -> tuple
     return pitch, speed
 
 
-def _speak(text: str, output: Path, character: dict[str, Any], index: int, emotion: str) -> None:
-    raw = output.with_suffix(".raw.wav")
-    models = [
+def _performance_direction(character: dict[str, Any], emotion: str) -> str:
+    voice = str(character.get("voice", "warm, lebhaft"))
+    feeling = emotion or "aufmerksam und natürlich"
+    return (
+        "Sprich den deutschen Satz wie in einer hochwertigen, modernen Kinder-Animationsserie. "
+        f"Stimmprofil: {voice}. Aktuelle Emotion: {feeling}. "
+        "Spiele die Emotion deutlich, aber glaubwürdig; reagiere auf den Gesprächspartner, "
+        "setze natürliche Mikro-Pausen und betone wichtige Wörter. Kein Vorleseton, "
+        "keine Werbung, kein Erzähler, nicht überdrehen."
+    )
+
+
+def _pollinations_speak(
+    text: str, raw: Path, character: dict[str, Any], index: int, emotion: str
+) -> bool:
+    key = os.getenv("POLLINATIONS_API_KEY", "")
+    if not key:
+        return False
+    voices = [
         value.strip() for value in os.getenv(
-            "PIPER_VOICE_MODELS",
-            os.getenv("PIPER_MODEL_PATH", "de_DE-thorsten-medium"),
+            "POLLINATIONS_TTS_VOICES", "nova,onyx,coral,echo"
         ).split(",") if value.strip()
     ]
-    model = models[index % len(models)]
+    _, speed = _voice_profile(character, index, emotion)
+    try:
+        response = httpx.post(
+            "https://gen.pollinations.ai/v1/audio/speech",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": os.getenv("POLLINATIONS_TTS_MODEL", "qwen-tts-instruct"),
+                "input": text,
+                "voice": voices[index % len(voices)],
+                "response_format": "wav",
+                "speed": round(max(.86, min(1.18, speed)), 2),
+                "instruct": _performance_direction(character, emotion),
+                "seed": _seed(f"{character.get('name', index)}:{text}") % 2_147_483_647,
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        if len(response.content) < 1_000:
+            raise RuntimeError("AI speech response was unexpectedly small")
+        raw.write_bytes(response.content)
+        return True
+    except (httpx.HTTPError, RuntimeError) as exc:
+        print(f"AI speech primary unavailable, using neural fallback: {exc}")
+        return False
+
+
+def _edge_speak(
+    text: str, raw: Path, character: dict[str, Any], index: int, emotion: str
+) -> None:
+    voices = [
+        value.strip() for value in os.getenv(
+            "EDGE_TTS_VOICES",
+            "de-DE-SeraphinaMultilingualNeural,de-DE-FlorianMultilingualNeural,"
+            "de-DE-KatjaNeural,de-DE-ConradNeural",
+        ).split(",") if value.strip()
+    ]
+    pitch, speed = _voice_profile(character, index, emotion)
+    rate = round((speed - 1.0) * 100)
+    pitch_hz = round((pitch - 1.0) * 45)
     performed = text
-    if any(x in emotion.lower() for x in ("zöger", "unsicher", "nachdenk")):
-        performed = performed.replace(",", " ...").replace(" aber ", " ... aber ")
+    if any(word in emotion.lower() for word in ("zöger", "unsicher", "nachdenk")):
+        performed = performed.replace(", ", " … ").replace(" aber ", " … aber ")
     subprocess.run(
         [
-            "piper", "--data-dir", os.getenv("PIPER_DATA_DIR", "."),
-            "--model", model, "--output_file", str(raw), "--sentence_silence", "0.18",
+            "edge-tts", "--voice", voices[index % len(voices)],
+            "--rate", f"{rate:+d}%", "--pitch", f"{pitch_hz:+d}Hz",
+            "--text", performed, "--write-media", str(raw),
         ],
-        input=performed, text=True, encoding="utf-8", check=True, timeout=300,
+        check=True, capture_output=True, timeout=300,
     )
-    pitch, speed = _voice_profile(character, index, emotion)
+
+
+def _speak(text: str, output: Path, character: dict[str, Any], index: int, emotion: str) -> None:
+    raw = output.with_suffix(".raw.audio")
+    provider = "pollinations-qwen"
+    if not _pollinations_speak(text, raw, character, index, emotion):
+        provider = "edge-neural"
+        _edge_speak(text, raw, character, index, emotion)
+    print(f"TTS_PROVIDER={provider} character={character.get('name', index)}")
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", str(raw), "-af",
-            f"asetrate=22050*{pitch},aresample=48000,atempo={speed / pitch},"
-            "highpass=f=70,lowpass=f=12000,equalizer=f=2600:t=q:w=1.1:g=2.0,"
-            "acompressor=threshold=-20dB:ratio=2.5:attack=8:release=90,alimiter=limit=0.92",
+            "aresample=48000,highpass=f=65,lowpass=f=14500,"
+            "acompressor=threshold=-18dB:ratio=2:attack=7:release=100,alimiter=limit=0.94",
             "-c:a", "pcm_s16le", str(output),
         ],
         check=True, capture_output=True, timeout=300,
@@ -373,10 +435,12 @@ def _blend_generated_poses(
         )
         return canvas
 
-    # Smooth stop-motion interpolation makes the generated arm/leg poses move
-    # continuously instead of switching as static slides.
-    speed = 8.0 if speaking else 3.2
-    factor = .5 - .5 * math.cos(time * speed)
+    # Full crossfades reveal small differences between generated poses as
+    # flipbook jitter. Keep the neutral pose dominant and add slow micro-motion.
+    wave = .5 - .5 * math.cos(time * (2.35 if speaking else 1.35))
+    factor = (.13 + .09 * wave) if speaking else (.08 + .07 * wave)
+    if pose in {"walk", "share"}:
+        factor += .05
     return Image.blend(centered(neutral), centered(selected), factor)
 
 
@@ -409,12 +473,12 @@ def _composite_character(
     frame: Image.Image, sprite: Image.Image, center_x: float, ground: float,
     height: int, time: float, speaking: bool, phase: float,
 ) -> None:
-    breath = 1.0 + math.sin(time * (4.6 if speaking else 1.9) + phase) * (.013 if speaking else .006)
+    breath = 1.0 + math.sin(time * (3.0 if speaking else 1.7) + phase) * (.007 if speaking else .004)
     new_h = max(8, round(height * breath))
     new_w = round(sprite.width * new_h / sprite.height)
     rendered = sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
     rendered = rendered.rotate(
-        math.sin(time * 3.8 + phase) * (1.0 if speaking else .25),
+        math.sin(time * 2.5 + phase) * (.28 if speaking else .12),
         Image.Resampling.BICUBIC, expand=True,
     )
     shadow = Image.new("RGBA", frame.size)
@@ -506,21 +570,6 @@ def render_storyboard_frame(
             word in str(scene.get("action", "")).lower() for word in ("teil", "gibt", "reicht", "gemeinsam")
         ) else WIDTH*.50
         _composite_prop(frame, str(props[0]), prop_x, HEIGHT*.80, 115)
-    if cue:
-        panel = Image.new("RGBA", frame.size)
-        pd = ImageDraw.Draw(panel)
-        pd.rounded_rectangle(
-            (205, HEIGHT-111, WIDTH-205, HEIGHT-22), radius=27,
-            fill=(24, 31, 48, 218), outline=(255, 222, 139, 225), width=2,
-        )
-        panel = panel.filter(ImageFilter.GaussianBlur(.25))
-        frame.alpha_composite(panel)
-        draw = ImageDraw.Draw(frame, "RGBA")
-        draw.text((239, HEIGHT-97), cue.speaker.upper(), font=_font(17, True), fill=(255, 220, 120))
-        draw.multiline_text(
-            (WIDTH/2, HEIGHT-67), "\n".join(_wrap(cue.text, 55)),
-            font=_font(24, True), fill=(255, 255, 251), anchor="ma", align="center",
-        )
     return frame
 
 
