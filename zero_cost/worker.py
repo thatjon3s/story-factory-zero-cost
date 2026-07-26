@@ -944,9 +944,10 @@ def quality_preview() -> None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(video, artifact_dir / video.name)
         shutil.copy2(contact_sheet, artifact_dir / contact_sheet.name)
-        for name, image in character_images.items():
+        for name, poses in character_images.items():
             safe_name = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
-            shutil.copy2(image, artifact_dir / f"character-{safe_name}.png")
+            for pose, image in poses.items():
+                shutil.copy2(image, artifact_dir / f"character-{safe_name}-{pose}.png")
 
 
 def main() -> None:
