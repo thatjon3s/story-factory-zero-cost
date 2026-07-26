@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
 import hashlib
 import os
 import time
@@ -9,7 +10,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 STYLE_LOCK = (
@@ -39,12 +40,13 @@ def background_prompt(scene: dict[str, Any], package: dict[str, Any]) -> str:
 
 def character_prompt(character: dict[str, Any]) -> str:
     return (
-        f"{STYLE_LOCK} Isolated full-body character cutout of {character.get('name')}: "
+        f"{STYLE_LOCK} Horizontal three-panel animation sprite sheet of {character.get('name')}: "
         f"{character.get('appearance', '')}; wearing exactly {character.get('wardrobe', '')}. "
-        "Standing in a relaxed three-quarter pose, both complete hands and both complete shoes visible, "
-        "arms slightly away from the torso for animation, friendly natural expression, looking toward "
-        "camera, single character only. Perfectly uniform pure white studio background, no floor, "
-        "no scenery, no props, no cast shadow, no text, no border. Keep this exact character design."
+        "Three equal columns showing exactly the same full-body character and identical clothing: "
+        "left panel relaxed neutral pose, center panel lively speaking gesture with one arm raised, "
+        "right panel stepping forward and reaching with both hands. Both complete hands and shoes "
+        "visible in every panel. Perfectly uniform pure chroma-key green #00FF00 background in all "
+        "three panels, no floor, scenery, props, separators, cast shadows, text or border."
     )
 
 
@@ -197,22 +199,61 @@ def _validate_image(path: Path, expected_ratio: float = 16 / 9) -> None:
             raise RuntimeError(f"Generated image has wrong aspect ratio: {width}x{height}")
 
 
-def _extract_white_background(source: Path, destination: Path) -> None:
+def _extract_background(source: Path, destination: Path) -> None:
     with Image.open(source) as opened:
         image = opened.convert("RGBA")
-    pixels = []
-    for red, green, blue, _ in image.getdata():
-        low, high = min(red, green, blue), max(red, green, blue)
-        whiteness = min(255, max(0, (low - 170) * 3))
-        neutrality = min(255, max(0, 255 - (high - low) * 7))
-        pixels.append(255 - min(whiteness, neutrality))
+    width, height = image.size
+    samples = [
+        image.getpixel((x, y))[:3]
+        for x, y in (
+            (2, 2), (width - 3, 2), (2, height - 3), (width - 3, height - 3),
+            (width // 2, 2), (width // 2, height - 3),
+        )
+    ]
+    background = tuple(sorted(channel)[len(samples) // 2] for channel in zip(*samples))
+
+    def distance(pixel: tuple[int, int, int, int]) -> float:
+        return sum((pixel[index] - background[index]) ** 2 for index in range(3)) ** .5
+
+    source_pixels = image.load()
+    connected = bytearray(width * height)
+    queue: deque[tuple[int, int]] = deque()
+    for x in range(width):
+        queue.extend(((x, 0), (x, height - 1)))
+    for y in range(1, height - 1):
+        queue.extend(((0, y), (width - 1, y)))
+    while queue:
+        x, y = queue.popleft()
+        offset = y * width + x
+        if connected[offset] or distance(source_pixels[x, y]) > 115:
+            continue
+        connected[offset] = 1
+        if x:
+            queue.append((x - 1, y))
+        if x + 1 < width:
+            queue.append((x + 1, y))
+        if y:
+            queue.append((x, y - 1))
+        if y + 1 < height:
+            queue.append((x, y + 1))
+
+    pixels: list[int] = []
+    rgb = image.load()
+    for y in range(height):
+        for x in range(width):
+            if not connected[y * width + x]:
+                pixels.append(255)
+                continue
+            delta = distance(rgb[x, y])
+            pixels.append(max(0, min(255, round((delta - 20) * 3.0))))
     alpha = Image.new("L", image.size)
     alpha.putdata(pixels)
+    alpha = alpha.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(.55))
     image.putalpha(alpha)
     bbox = alpha.getbbox()
     if not bbox:
         raise RuntimeError("Generated character contains no extractable foreground")
-    margin = 24
+    margin = 10
     bbox = (
         max(0, bbox[0] - margin), max(0, bbox[1] - margin),
         min(image.width, bbox[2] + margin), min(image.height, bbox[3] + margin),
@@ -220,9 +261,21 @@ def _extract_white_background(source: Path, destination: Path) -> None:
     image.crop(bbox).save(destination, "PNG", optimize=True)
 
 
+def _split_character_sheet(source: Path, destinations: dict[str, Path]) -> None:
+    with Image.open(source) as opened:
+        sheet = opened.convert("RGBA")
+    cell_width = sheet.width // 3
+    for index, pose in enumerate(("neutral", "talk", "action")):
+        cell_source = source.with_name(f"{source.stem}-{pose}-cell.png")
+        left = index * cell_width
+        right = sheet.width if index == 2 else (index + 1) * cell_width
+        sheet.crop((left, 0, right, sheet.height)).save(cell_source, "PNG")
+        _extract_background(cell_source, destinations[pose])
+
+
 def generate_visual_assets(
     package: dict[str, Any], workdir: Path
-) -> tuple[list[Path], dict[str, Path], str]:
+) -> tuple[list[Path], dict[str, dict[str, Path]], str]:
     requested = os.getenv("SCENE_IMAGE_PROVIDER", "auto").strip().lower()
     paid_allowed = os.getenv("ALLOW_PAID_IMAGE_API", "false").lower() == "true"
     # "auto" must always remain genuinely zero-cost, even when old paid keys exist.
@@ -253,24 +306,27 @@ def generate_visual_assets(
         else:
             provider.generate(prompt, destination)
         images.append(destination)
-    characters: dict[str, Path] = {}
+    characters: dict[str, dict[str, Path]] = {}
     for index, character in enumerate(package.get("character_bible") or []):
         name = str(character.get("name", f"character-{index}"))
         raw = workdir / f"generated-character-{index:02d}-raw.png"
-        destination = workdir / f"generated-character-{index:02d}.png"
+        destinations = {
+            pose: workdir / f"generated-character-{index:02d}-{pose}.png"
+            for pose in ("neutral", "talk", "action")
+        }
         prompt = character_prompt(character)
         if isinstance(provider, PollinationsImageProvider):
             identity = "|".join((
                 name, str(character.get("appearance", "")), str(character.get("wardrobe", "")),
             ))
             provider.generate(
-                prompt, raw, seed_material=identity, width=768, height=1024,
+                prompt, raw, seed_material=identity, width=1536, height=768,
             )
-            _extract_white_background(raw, destination)
+            _split_character_sheet(raw, destinations)
         else:
             provider.generate(prompt, raw)
-            _extract_white_background(raw, destination)
-        characters[name] = destination
+            _split_character_sheet(raw, destinations)
+        characters[name] = destinations
     return images, characters, provider_name
 
 
