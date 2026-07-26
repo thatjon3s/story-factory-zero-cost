@@ -511,10 +511,7 @@ def render_storyboard_frame(
             heights[shot], time, speaking, index * 1.8,
         )
     props = scene.get("props") or []
-    if scene_image is None and props and not any(
-        word in str(scene.get("action", "")).lower()
-        for word in ("teil", "reich", "gibt", "nimmt")
-    ):
+    if props:
         phase = min(1.0, time / max(1.0, float(scene.get("duration_seconds", 8))))
         prop_x = positions[0] + (positions[1] - positions[0]) * phase if any(
             word in str(scene.get("action", "")).lower() for word in ("teil", "gibt", "reicht", "gemeinsam")
