@@ -33,9 +33,7 @@ jobs:
       SCENE_IMAGE_PROVIDER: ${{ vars.SCENE_IMAGE_PROVIDER || 'auto' }}
       POLLINATIONS_IMAGE_MODEL: ${{ vars.POLLINATIONS_IMAGE_MODEL || 'zimage' }}
       POLLINATIONS_BACKGROUND_MODEL: "zimage"
-      POLLINATIONS_TTS_MODEL: "qwen-tts-instruct"
-      POLLINATIONS_TTS_VOICES: "nova,onyx"
-      EDGE_TTS_VOICES: "de-DE-SeraphinaMultilingualNeural,de-DE-FlorianMultilingualNeural"
+      EDGE_TTS_VOICES: "de-DE-SeraphinaMultilingualNeural,de-DE-ConradNeural"
       ALLOW_PAID_IMAGE_API: ${{ vars.ALLOW_PAID_IMAGE_API || 'false' }}
       ALLOW_PAID_API: "false"
       MAX_EPISODE_COST_USD: "0"
@@ -57,10 +55,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          edge-tts --voice de-DE-SeraphinaMultilingualNeural \
-            --text "Dies ist der automatische Stimmtest." \
-            --write-media /tmp/neural-voice-smoke.mp3
-          test -s /tmp/neural-voice-smoke.mp3
+          for voice in de-DE-SeraphinaMultilingualNeural de-DE-ConradNeural; do
+            edge-tts --voice "$voice" \
+              --text "Dies ist der automatische Stimmtest." \
+              --write-media "/tmp/$voice-smoke.mp3"
+            test -s "/tmp/$voice-smoke.mp3"
+          done
           if [ "$QUALITY_PREVIEW" != "true" ]; then
             for attempt in $(seq 1 5); do
               if curl -fsSL --retry 4 --retry-all-errors \
