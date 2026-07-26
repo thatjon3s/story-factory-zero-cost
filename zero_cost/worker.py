@@ -21,7 +21,7 @@ import httpx
 from cost_guard import CostGuard
 from memory import SupabaseMemory, slugify
 from puppet_renderer import render_contact_sheet, render_puppet_master
-from scene_image_provider import generate_scene_images
+from scene_image_provider import generate_visual_assets
 from screenplay import finalize_package
 from supabase_control import SupabaseControlPlane
 
@@ -759,7 +759,7 @@ def produce(control: ControlPlane) -> None:
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
-            scene_images, image_provider = generate_scene_images(package, workdir)
+            scene_images, character_images, image_provider = generate_visual_assets(package, workdir)
             package = {
                 **package,
                 "visual_mode": (
@@ -774,13 +774,13 @@ def produce(control: ControlPlane) -> None:
                 ),
             }
             contact_sheet = workdir / "storyboard-contact-sheet.jpg"
-            quality = render_contact_sheet(package, contact_sheet, scene_images)
+            quality = render_contact_sheet(package, contact_sheet, scene_images, character_images)
             if quality["mean_saturation"] < 45:
                 raise RuntimeError(f"Storyboard quality gate: colors are too weak ({quality})")
             if quality["mean_scene_difference"] < 2.0:
                 raise RuntimeError(f"Storyboard quality gate: scenes are too repetitive ({quality})")
             control.event("storyboard_quality_passed", episode["id"], **quality)
-            render_puppet_master(package, video, workdir, scene_images)
+            render_puppet_master(package, video, workdir, scene_images, character_images)
             artifact_dir = os.getenv("RENDER_ARTIFACT_DIR")
             if artifact_dir:
                 artifact_path = Path(artifact_dir)
@@ -924,19 +924,29 @@ def quality_preview() -> None:
         workdir = Path(tmp)
         video = workdir / "quality-preview-16x9.mp4"
         contact_sheet = workdir / "storyboard-contact-sheet.jpg"
-        scene_images, image_provider = generate_scene_images(package, workdir)
+        scene_images, character_images, image_provider = generate_visual_assets(package, workdir)
         if not scene_images:
             raise RuntimeError(f"Dynamic preview received no generated images: {image_provider}")
-        print(f"SCENE_IMAGE_PROVIDER={image_provider}; GENERATED_SCENES={len(scene_images)}")
-        quality = render_contact_sheet(package, contact_sheet, scene_images)
+        if len(character_images) < 2:
+            raise RuntimeError(
+                f"Dynamic preview received too few generated characters: {len(character_images)}"
+            )
+        print(
+            f"SCENE_IMAGE_PROVIDER={image_provider}; GENERATED_SCENES={len(scene_images)}; "
+            f"GENERATED_CHARACTERS={len(character_images)}"
+        )
+        quality = render_contact_sheet(package, contact_sheet, scene_images, character_images)
         print(f"STORYBOARD_QUALITY={json.dumps(quality)}")
         if quality["mean_saturation"] < 45 or quality["mean_scene_difference"] < 2.0:
             raise RuntimeError(f"Storyboard quality gate failed: {quality}")
-        render_puppet_master(package, video, workdir, scene_images)
+        render_puppet_master(package, video, workdir, scene_images, character_images)
         artifact_dir = Path(os.getenv("RENDER_ARTIFACT_DIR", "render-artifacts"))
         artifact_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(video, artifact_dir / video.name)
         shutil.copy2(contact_sheet, artifact_dir / contact_sheet.name)
+        for name, image in character_images.items():
+            safe_name = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
+            shutil.copy2(image, artifact_dir / f"character-{safe_name}.png")
 
 
 def main() -> None:
