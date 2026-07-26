@@ -316,6 +316,11 @@ sich übergangen, ein Spielzeug wird nicht geteilt, ein Missverständnis entsteh
 erzählt oder jemand muss Mut zum Entschuldigen finden. Keine Gewalt, Bedrohung, Horror, Waffen, Tod, Kriminalität,
 dunkle Mystery, gefährliche Mutproben oder erwachsene Beziehungskonflikte.
 
+Die feste Hauptbesetzung besteht aus Mia und Noah; beide müssen im `character_bible` stehen und die Dialoge
+tragen. Beschränke sichtbare Handlungsobjekte auf rote Spielzeugschaufel, gelb-blauen Ball, Papierboot und
+Picknickkorb. So bleiben Figuren, Kleidung, Schauplatz und Requisiten zwischen allen Einstellungen visuell
+identisch. Andere Gegenstände dürfen nicht erwähnt werden.
+
 Jede Folge braucht einen sofort verständlichen Wunsch, eine kleine sozial spannende Spitze, einen konkreten Versuch
 der Figuren, eine faire Lösung durch Zuhören oder Zusammenarbeit und einen heiteren letzten Haken. Dialoge klingen
 gesprochen, lebhaft und altersgerecht; nutze Reaktionen, Freude, Überraschung, zögernde Pausen und Humor statt
@@ -440,7 +445,7 @@ Gib ausschließlich valides JSON zurück."""
             package = json.loads(response.json()["response"])
             package.update({
                 "package_version": 2,
-                "story_profile": "social-kindness-v2",
+                "story_profile": "social-kindness-v3",
                 "universe_slug": universe_slug,
                 "series_slug": series_slug,
                 "generator": payload["model"],
@@ -731,7 +736,7 @@ def produce(control: ControlPlane) -> None:
         existing_package = episode.get("package") or {}
         if (
             existing_package.get("package_version") == 2
-            and existing_package.get("story_profile") == "social-kindness-v2"
+            and existing_package.get("story_profile") == "social-kindness-v3"
         ):
             package = existing_package
         else:
@@ -750,8 +755,8 @@ def produce(control: ControlPlane) -> None:
             workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
             package = {
                 **package,
-                "visual_mode": "controlled-2d-cutout-v2",
-                "generation_token": f"2D-CUTOUT-{package['revision'][:8].upper()}",
+                "visual_mode": "premium-illustrated-storybook-v3",
+                "generation_token": f"ILLUSTRATED-V3-{package['revision'][:8].upper()}",
             }
             contact_sheet = workdir / "storyboard-contact-sheet.jpg"
             quality = render_contact_sheet(package, contact_sheet)
