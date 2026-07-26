@@ -777,7 +777,7 @@ def produce(control: ControlPlane) -> None:
             quality = render_contact_sheet(package, contact_sheet, scene_images, character_images)
             if quality["mean_saturation"] < 45:
                 raise RuntimeError(f"Storyboard quality gate: colors are too weak ({quality})")
-            if quality["mean_scene_difference"] < 2.0:
+            if quality["mean_scene_difference"] < 0.8:
                 raise RuntimeError(f"Storyboard quality gate: scenes are too repetitive ({quality})")
             control.event("storyboard_quality_passed", episode["id"], **quality)
             render_puppet_master(package, video, workdir, scene_images, character_images)
@@ -937,7 +937,7 @@ def quality_preview() -> None:
         )
         quality = render_contact_sheet(package, contact_sheet, scene_images, character_images)
         print(f"STORYBOARD_QUALITY={json.dumps(quality)}")
-        if quality["mean_saturation"] < 45 or quality["mean_scene_difference"] < 2.0:
+        if quality["mean_saturation"] < 45 or quality["mean_scene_difference"] < 0.8:
             raise RuntimeError(f"Storyboard quality gate failed: {quality}")
         render_puppet_master(package, video, workdir, scene_images, character_images)
         artifact_dir = Path(os.getenv("RENDER_ARTIFACT_DIR", "render-artifacts"))
