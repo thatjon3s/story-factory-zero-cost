@@ -103,6 +103,7 @@ jobs:
           path: |
             render-artifacts/*.mp4
             render-artifacts/*.jpg
+            render-artifacts/*.png
           if-no-files-found: ignore
           retention-days: 14
       - name: Show local model diagnostics
