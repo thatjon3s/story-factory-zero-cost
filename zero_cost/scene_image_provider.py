@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from PIL import Image
@@ -111,6 +113,53 @@ class GoogleImageProvider:
         _validate_image(destination)
 
 
+class PollinationsImageProvider:
+    """Free, keyless scene generation through Pollinations' public image API."""
+
+    base_url = "https://gen.pollinations.ai"
+
+    def __init__(self) -> None:
+        self.model = os.getenv("POLLINATIONS_IMAGE_MODEL", "zimage").strip() or "zimage"
+        self.key = os.getenv("POLLINATIONS_API_KEY", "").strip()
+
+    def generate(self, prompt: str, destination: Path) -> None:
+        seed = int(hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8], 16) % 2_147_483_647
+        url = f"{self.base_url}/image/{quote(prompt, safe='')}"
+        params = {
+            "model": self.model,
+            "width": 1280,
+            "height": 720,
+            "seed": seed,
+            "safe": "true",
+        }
+        headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
+        last_error: Exception | None = None
+        for attempt in range(4):
+            try:
+                with httpx.stream(
+                    "GET",
+                    url,
+                    params=params,
+                    headers=headers,
+                    follow_redirects=True,
+                    timeout=900,
+                ) as response:
+                    response.raise_for_status()
+                    with destination.open("wb") as output:
+                        for chunk in response.iter_bytes():
+                            output.write(chunk)
+                _validate_image(destination)
+                return
+            except Exception as error:
+                last_error = error
+                destination.unlink(missing_ok=True)
+                if attempt < 3:
+                    time.sleep(15 * (attempt + 1))
+        raise RuntimeError(
+            f"Pollinations failed after 4 attempts using model {self.model}: {last_error}"
+        ) from last_error
+
+
 def _download_image(url: str, destination: Path) -> None:
     with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
         response.raise_for_status()
@@ -134,16 +183,17 @@ def _validate_image(path: Path) -> None:
 def generate_scene_images(package: dict[str, Any], workdir: Path) -> tuple[list[Path], str]:
     requested = os.getenv("SCENE_IMAGE_PROVIDER", "auto").strip().lower()
     paid_allowed = os.getenv("ALLOW_PAID_IMAGE_API", "false").lower() == "true"
-    available = (
-        "krea" if os.getenv("KREA_API_KEY") or os.getenv("KREA_API_TOKEN") else
-        "google" if os.getenv("GEMINI_API_KEY") else ""
-    )
-    provider_name = available if requested == "auto" else requested
-    if provider_name not in {"krea", "google"}:
+    # "auto" must always remain genuinely zero-cost, even when old paid keys exist.
+    provider_name = "pollinations" if requested == "auto" else requested
+    if provider_name not in {"pollinations", "krea", "google"}:
         return [], "illustrated-static-fallback"
-    if not paid_allowed:
+    if provider_name in {"krea", "google"} and not paid_allowed:
         return [], f"{provider_name}-blocked-by-zero-cost-guard"
-    provider = KreaImageProvider() if provider_name == "krea" else GoogleImageProvider()
+    provider = (
+        KreaImageProvider() if provider_name == "krea" else
+        GoogleImageProvider() if provider_name == "google" else
+        PollinationsImageProvider()
+    )
     images: list[Path] = []
     for index, scene in enumerate(package.get("scenes") or []):
         destination = workdir / f"generated-scene-{index:02d}.png"
