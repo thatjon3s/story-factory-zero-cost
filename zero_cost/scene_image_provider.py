@@ -19,16 +19,21 @@ STYLE_LOCK = (
     "no watermark, landscape 16:9."
 )
 
+ENVIRONMENT_STYLE_LOCK = (
+    "Premium contemporary European children's-book environment painting, painterly texture, "
+    "cinematic depth, colorful warm family-friendly mood, rich environmental detail, "
+    "landscape 16:9, no text, no logo, no watermark."
+)
+
 
 def background_prompt(scene: dict[str, Any], package: dict[str, Any]) -> str:
     props = ", ".join(str(prop) for prop in scene.get("props", [])) or "appropriate story props"
     return (
-        f"{STYLE_LOCK} Environment plate only, with absolutely no people, children, silhouettes, "
-        f"faces or human figures. Setting: {scene.get('location', '')}. "
-        f"Arrange these objects naturally for the upcoming action: {props}. "
+        f"{ENVIRONMENT_STYLE_LOCK} Empty establishing-shot environment plate before the actors "
+        f"arrive. Setting: {scene.get('location', '')}. Arrange these objects naturally: {props}. "
         f"Camera: {scene.get('camera', '')}. "
-        f"Lighting: {scene.get('lighting', '')}. Show one coherent instant of the action. "
-        "Leave clear open foreground space for two separately composited animated characters."
+        f"Lighting: {scene.get('lighting', '')}. Leave clear open foreground space for two "
+        "separately composited animated characters. The location is completely deserted."
     )
 
 
@@ -126,18 +131,21 @@ class PollinationsImageProvider:
 
     def generate(
         self, prompt: str, destination: Path, *, seed_material: str | None = None,
-        width: int = 1280, height: int = 720,
+        width: int = 1280, height: int = 720, model: str | None = None,
+        negative_prompt: str | None = None,
     ) -> None:
         seed_source = seed_material or prompt
         seed = int(hashlib.sha256(seed_source.encode("utf-8")).hexdigest()[:8], 16) % 2_147_483_647
         url = f"{self.base_url}/image/{quote(prompt, safe='')}"
         params = {
-            "model": self.model,
+            "model": model or self.model,
             "width": width,
             "height": height,
             "seed": seed,
             "safe": "true",
         }
+        if negative_prompt:
+            params["negative_prompt"] = negative_prompt
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         last_error: Exception | None = None
         for attempt in range(4):
@@ -162,7 +170,7 @@ class PollinationsImageProvider:
                 if attempt < 3:
                     time.sleep(15 * (attempt + 1))
         raise RuntimeError(
-            f"Pollinations failed after 4 attempts using model {self.model}: {last_error}"
+            f"Pollinations failed after 4 attempts using model {model or self.model}: {last_error}"
         ) from last_error
 
 
@@ -233,7 +241,15 @@ def generate_visual_assets(
         destination = workdir / f"generated-scene-{index:02d}.png"
         prompt = background_prompt(scene, package)
         if isinstance(provider, PollinationsImageProvider):
-            provider.generate(prompt, destination)
+            provider.generate(
+                prompt,
+                destination,
+                model=os.getenv("POLLINATIONS_BACKGROUND_MODEL", "zimage"),
+                negative_prompt=(
+                    "people, person, child, children, boy, girl, man, woman, human, face, body, "
+                    "crowd, silhouette, character, animal, portrait, mannequin"
+                ),
+            )
         else:
             provider.generate(prompt, destination)
         images.append(destination)
