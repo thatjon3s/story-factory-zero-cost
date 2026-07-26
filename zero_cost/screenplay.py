@@ -129,6 +129,9 @@ def validate_screenplay(package: dict[str, Any]) -> list[str]:
         if speakers != {"Mia", "Noah"}:
             errors.append("Illustrated v3 episodes must use exactly the fixed cast Mia and Noah")
         for index, scene in enumerate(scenes, 1):
+            prompt = str(scene.get("visual_prompt", "")).strip()
+            if len(prompt.split()) < 25:
+                errors.append(f"Scene {index}: visual_prompt is too short for consistent generation")
             for prop in scene.get("props") or []:
                 normalized = str(prop).lower().replace(" ", "-")
                 if not any(allowed in normalized for allowed in ILLUSTRATED_PROPS):
