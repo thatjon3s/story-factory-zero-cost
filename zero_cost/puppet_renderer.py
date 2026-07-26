@@ -6,6 +6,7 @@ import os
 import subprocess
 import wave
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 WIDTH, HEIGHT = 1280, 720
 FPS = int(os.getenv("PUPPET_FPS", "24"))
+ASSET_DIR = Path(__file__).with_name("assets")
 
 
 @dataclass(frozen=True)
@@ -286,6 +288,109 @@ def _draw_character(draw, character, index, x, ground, scale, t, speaking, emoti
                  fill=(137, 38, 55), outline=outline, width=3)
 
 
+@lru_cache(maxsize=8)
+def _illustrated_asset(name: str) -> Image.Image:
+    path = ASSET_DIR / name
+    if not path.exists():
+        raise RuntimeError(f"Required illustrated asset is missing: {path}")
+    return Image.open(path).convert("RGBA")
+
+
+def _cover_asset(image: Image.Image, width: int, height: int) -> Image.Image:
+    factor = max(width / image.width, height / image.height)
+    return image.resize((round(image.width * factor), round(image.height * factor)), Image.Resampling.LANCZOS)
+
+
+def _illustrated_background(scene_index: int, time: float) -> Image.Image:
+    source = _cover_asset(_illustrated_asset("playground-lake.png"), 1440, 810)
+    progress = (math.sin(time * .16 + scene_index * 1.7) + 1) / 2
+    if scene_index % 2:
+        progress = 1 - progress
+    x = int((source.width - WIDTH) * progress)
+    y = int((source.height - HEIGHT) * (.38 + .12 * math.sin(time * .11 + scene_index)))
+    frame = source.crop((x, y, x + WIDTH, y + HEIGHT))
+    return Image.alpha_composite(
+        frame, Image.new("RGBA", frame.size, (255, 217, 157, 15 if scene_index % 2 else 6))
+    )
+
+
+_POSES = {
+    "neutral": (0, 0), "talk": (1, 0), "worried": (2, 0),
+    "walk": (0, 1), "share": (1, 1), "celebrate": (2, 1),
+}
+
+
+@lru_cache(maxsize=32)
+def _illustrated_sprite(character: str, pose: str) -> Image.Image:
+    filename = "mia-poses.png" if character.lower().startswith("mia") else "noah-poses.png"
+    sheet = _illustrated_asset(filename)
+    col, row = _POSES[pose]
+    cell_w, cell_h = sheet.width // 3, sheet.height // 2
+    cell = sheet.crop((col * cell_w, row * cell_h, (col + 1) * cell_w, (row + 1) * cell_h))
+    bbox = cell.getchannel("A").getbbox()
+    return cell.crop(bbox) if bbox else cell
+
+
+@lru_cache(maxsize=8)
+def _illustrated_prop(kind: str) -> Image.Image:
+    sheet = _illustrated_asset("props.png")
+    col, row = {"shovel": (0, 0), "ball": (1, 0), "boat": (0, 1), "basket": (1, 1)}[kind]
+    cell_w, cell_h = sheet.width // 2, sheet.height // 2
+    cell = sheet.crop((col * cell_w, row * cell_h, (col + 1) * cell_w, (row + 1) * cell_h))
+    bbox = cell.getchannel("A").getbbox()
+    return cell.crop(bbox) if bbox else cell
+
+
+def _select_pose(scene: dict[str, Any], cue: DialogueCue | None, name: str, scene_index: int) -> str:
+    action = str(scene.get("action", "")).lower()
+    emotion = (cue.emotion if cue and cue.speaker == name else "").lower()
+    speaking = bool(cue and cue.speaker == name)
+    if any(word in action for word in ("komm", "geh", "lauf", "renn", "spazier")) and not speaking:
+        return "walk"
+    if any(word in emotion for word in ("traurig", "unsicher", "besorgt", "enttäusch", "zöger")):
+        return "worried"
+    if any(word in action for word in ("teil", "reich", "gibt", "nimmt", "gemeinsam", "hilft")):
+        return "share"
+    if scene_index >= 4 or any(word in emotion for word in ("lach", "freu", "begeistert", "erleichtert")):
+        return "celebrate"
+    return "talk" if speaking else "neutral"
+
+
+def _composite_character(
+    frame: Image.Image, sprite: Image.Image, center_x: float, ground: float,
+    height: int, time: float, speaking: bool, phase: float,
+) -> None:
+    breath = 1.0 + math.sin(time * (4.6 if speaking else 1.9) + phase) * (.013 if speaking else .006)
+    new_h = max(8, round(height * breath))
+    new_w = round(sprite.width * new_h / sprite.height)
+    rendered = sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    rendered = rendered.rotate(
+        math.sin(time * 3.8 + phase) * (1.0 if speaking else .25),
+        Image.Resampling.BICUBIC, expand=True,
+    )
+    shadow = Image.new("RGBA", frame.size)
+    sd = ImageDraw.Draw(shadow)
+    sd.ellipse(
+        (center_x-new_w*.24, ground-16, center_x+new_w*.24, ground+11),
+        fill=(25, 35, 32, 72),
+    )
+    frame.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(9)))
+    frame.alpha_composite(rendered, (round(center_x-rendered.width/2), round(ground-rendered.height)))
+
+
+def _composite_prop(frame: Image.Image, label: str, center_x: float, ground: float, height: int = 120) -> None:
+    value = label.lower()
+    kind = (
+        "shovel" if any(x in value for x in ("schaufel", "spaten")) else
+        "boat" if any(x in value for x in ("boot", "schiff")) else
+        "basket" if any(x in value for x in ("korb", "picknick")) else "ball"
+    )
+    sprite = _illustrated_prop(kind)
+    width = round(sprite.width * height / sprite.height)
+    sprite = sprite.resize((width, height), Image.Resampling.LANCZOS)
+    frame.alpha_composite(sprite, (round(center_x-width/2), round(ground-height)))
+
+
 def _active_cue(cues: list[DialogueCue], time: float):
     return next((cue for cue in cues if cue.start <= time < cue.end), None)
 
@@ -307,37 +412,52 @@ def render_storyboard_frame(
     package: dict[str, Any], scene_index: int, time: float, cue: DialogueCue | None = None
 ) -> Image.Image:
     scene = package["scenes"][scene_index]
-    frame = _background(scene, scene_index)
+    frame = _illustrated_background(scene_index, time)
     draw = ImageDraw.Draw(frame, "RGBA")
     characters = package.get("character_bible") or []
     shot = scene_index % 4
     positions = (
-        (WIDTH*.29, WIDTH*.71),
-        (WIDTH*.36, WIDTH*.76),
-        (WIDTH*.24, WIDTH*.62),
-        (WIDTH*.38, WIDTH*.66),
+        (WIDTH*.29, WIDTH*.71), (WIDTH*.36, WIDTH*.75),
+        (WIDTH*.24, WIDTH*.64), (WIDTH*.38, WIDTH*.67),
     )[shot]
-    scale = (0.86, 1.02, 0.78, 1.0)[shot]
+    heights = (475, 535, 430, 510)
     for index, character in enumerate(characters[:2]):
-        speaking = bool(cue and cue.speaker == character.get("name"))
-        _draw_character(
-            draw, character, index, positions[index], HEIGHT*.77, scale, time, speaking,
-            cue.emotion if speaking else "", str(scene.get("action", "")),
-            1 if index == 0 else -1,
+        name = str(character.get("name", "Mia" if index == 0 else "Noah"))
+        speaking = bool(cue and cue.speaker == name)
+        pose = _select_pose(scene, cue, name, scene_index)
+        x = positions[index]
+        if pose == "walk":
+            entrance = math.sin(min(1.0, time / 1.4) * math.pi / 2)
+            x += (entrance - 1) * (180 if index == 0 else -180)
+        _composite_character(
+            frame, _illustrated_sprite(name, pose), x, HEIGHT*.81,
+            heights[shot], time, speaking, index * 1.8,
         )
     props = scene.get("props") or []
-    if props:
+    if props and not any(
+        word in str(scene.get("action", "")).lower()
+        for word in ("teil", "reich", "gibt", "nimmt")
+    ):
         phase = min(1.0, time / max(1.0, float(scene.get("duration_seconds", 8))))
         prop_x = positions[0] + (positions[1] - positions[0]) * phase if any(
             word in str(scene.get("action", "")).lower() for word in ("teil", "gibt", "reicht", "gemeinsam")
         ) else WIDTH*.50
-        _draw_prop(draw, str(props[0]), prop_x, HEIGHT*.73, .85)
+        _composite_prop(frame, str(props[0]), prop_x, HEIGHT*.80, 115)
     if cue:
-        draw.rounded_rectangle((190, HEIGHT-116, WIDTH-190, HEIGHT-24), radius=22,
-                               fill=(24, 31, 48, 220), outline=(255, 216, 94), width=3)
-        draw.text((225, HEIGHT-102), cue.speaker.upper(), font=_font(18, True), fill=(255, 220, 100))
-        draw.multiline_text((WIDTH/2, HEIGHT-72), "\n".join(_wrap(cue.text)),
-                            font=_font(25, True), fill="white", anchor="ma", align="center")
+        panel = Image.new("RGBA", frame.size)
+        pd = ImageDraw.Draw(panel)
+        pd.rounded_rectangle(
+            (205, HEIGHT-111, WIDTH-205, HEIGHT-22), radius=27,
+            fill=(24, 31, 48, 218), outline=(255, 222, 139, 225), width=2,
+        )
+        panel = panel.filter(ImageFilter.GaussianBlur(.25))
+        frame.alpha_composite(panel)
+        draw = ImageDraw.Draw(frame, "RGBA")
+        draw.text((239, HEIGHT-97), cue.speaker.upper(), font=_font(17, True), fill=(255, 220, 120))
+        draw.multiline_text(
+            (WIDTH/2, HEIGHT-67), "\n".join(_wrap(cue.text, 55)),
+            font=_font(24, True), fill=(255, 255, 251), anchor="ma", align="center",
+        )
     return frame
 
 
