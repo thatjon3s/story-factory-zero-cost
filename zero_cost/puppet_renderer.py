@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import subprocess
@@ -349,6 +350,36 @@ def _generated_sprite(path: str) -> Image.Image:
     return image.crop(bbox) if bbox else image
 
 
+def _blend_generated_poses(
+    paths: dict[str, Path], pose: str, time: float, speaking: bool
+) -> Image.Image:
+    target = "action" if pose in {"walk", "share"} else "talk" if (
+        speaking or pose in {"talk", "celebrate"}
+    ) else "neutral"
+    neutral = _generated_sprite(str(paths["neutral"].resolve()))
+    selected = _generated_sprite(str(paths[target].resolve()))
+    if target == "neutral":
+        return neutral
+    canvas_size = (
+        max(neutral.width, selected.width),
+        max(neutral.height, selected.height),
+    )
+
+    def centered(sprite: Image.Image) -> Image.Image:
+        canvas = Image.new("RGBA", canvas_size)
+        canvas.alpha_composite(
+            sprite,
+            ((canvas.width - sprite.width) // 2, canvas.height - sprite.height),
+        )
+        return canvas
+
+    # Smooth stop-motion interpolation makes the generated arm/leg poses move
+    # continuously instead of switching as static slides.
+    speed = 8.0 if speaking else 3.2
+    factor = .5 - .5 * math.cos(time * speed)
+    return Image.blend(centered(neutral), centered(selected), factor)
+
+
 @lru_cache(maxsize=8)
 def _illustrated_prop(kind: str) -> Image.Image:
     sheet = _illustrated_asset("props.png")
@@ -429,7 +460,7 @@ def _wrap(text: str, width: int = 48):
 def render_storyboard_frame(
     package: dict[str, Any], scene_index: int, time: float, cue: DialogueCue | None = None,
     scene_image: Path | None = None,
-    character_images: dict[str, Path] | None = None,
+    character_images: dict[str, dict[str, Path]] | None = None,
 ) -> Image.Image:
     scene = package["scenes"][scene_index]
     frame = _illustrated_background(scene_index, time, scene_image)
@@ -456,10 +487,10 @@ def render_storyboard_frame(
         if pose == "walk":
             entrance = math.sin(min(1.0, time / 1.4) * math.pi / 2)
             x += (entrance - 1) * (180 if index == 0 else -180)
-        sprite_path = (character_images or {}).get(name)
+        sprite_paths = (character_images or {}).get(name)
         sprite = (
-            _generated_sprite(str(sprite_path.resolve()))
-            if sprite_path is not None else _illustrated_sprite(name, pose)
+            _blend_generated_poses(sprite_paths, pose, time, speaking)
+            if sprite_paths is not None else _illustrated_sprite(name, pose)
         )
         _composite_character(
             frame, sprite, x, HEIGHT*.81,
@@ -495,7 +526,7 @@ def render_storyboard_frame(
 
 def render_contact_sheet(
     package: dict[str, Any], destination: Path, scene_images: list[Path] | None = None,
-    character_images: dict[str, Path] | None = None,
+    character_images: dict[str, dict[str, Path]] | None = None,
 ) -> dict[str, float]:
     frames = []
     for index, scene in enumerate(package["scenes"]):
@@ -526,7 +557,7 @@ def render_contact_sheet(
 def render_puppet_master(
     package: dict[str, Any], output: Path, workdir: Path,
     scene_images: list[Path] | None = None,
-    character_images: dict[str, Path] | None = None,
+    character_images: dict[str, dict[str, Path]] | None = None,
 ) -> None:
     audio, cue_sets, durations = build_dialogue_track(package, workdir)
     process = subprocess.Popen(
@@ -534,7 +565,8 @@ def render_puppet_master(
             "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{WIDTH}x{HEIGHT}",
             "-r", str(FPS), "-i", "-", "-i", str(audio), "-map", "0:v", "-map", "1:a",
             "-vf", "scale=1920:1080:flags=lanczos", "-c:v", "libx264", "-preset", "slow",
-            "-crf", "17", "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+            "-crf", "17", "-profile:v", "high", "-level:v", "4.2",
+            "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", "-shortest", str(output),
         ],
         stdin=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -555,6 +587,18 @@ def render_puppet_master(
         stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
         if process.wait(timeout=7200):
             raise RuntimeError(f"FFmpeg cutout render failed: {stderr[-2000:]}")
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,pix_fmt", "-of", "json", str(output),
+            ],
+            check=True, capture_output=True, text=True, timeout=120,
+        )
+        stream = json.loads(probe.stdout)["streams"][0]
+        if (stream.get("width"), stream.get("height"), stream.get("pix_fmt")) != (
+            1920, 1080, "yuv420p",
+        ):
+            raise RuntimeError(f"Final master is not validated 1080p yuv420p: {stream}")
     except Exception:
         process.kill()
         raise
