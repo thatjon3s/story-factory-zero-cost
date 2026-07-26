@@ -20,24 +20,26 @@ STYLE_LOCK = (
 )
 
 
-def visual_prompt(scene: dict[str, Any], package: dict[str, Any]) -> str:
-    supplied = str(scene.get("visual_prompt", "")).strip()
-    if supplied:
-        return supplied
-    cast = "; ".join(
-        f"{item.get('name')}: {item.get('appearance', '')}; {item.get('wardrobe', '')}"
-        for item in package.get("character_bible", [])
-    )
-    dialogue_mood = ", ".join(
-        f"{beat.get('speaker')} is {beat.get('emotion', 'natural')}"
-        for beat in scene.get("dialogue", [])
-    )
+def background_prompt(scene: dict[str, Any], package: dict[str, Any]) -> str:
+    props = ", ".join(str(prop) for prop in scene.get("props", [])) or "appropriate story props"
     return (
-        f"{STYLE_LOCK} Recurring cast must remain identical: {cast}. "
-        f"Setting: {scene.get('location', '')}. Visible action: {scene.get('action', '')}. "
-        f"Emotional performance: {dialogue_mood}. Camera: {scene.get('camera', '')}. "
+        f"{STYLE_LOCK} Environment plate only, with absolutely no people, children, silhouettes, "
+        f"faces or human figures. Setting: {scene.get('location', '')}. "
+        f"Arrange these objects naturally for the upcoming action: {props}. "
+        f"Camera: {scene.get('camera', '')}. "
         f"Lighting: {scene.get('lighting', '')}. Show one coherent instant of the action. "
-        "Exactly the named recurring characters, no duplicate people."
+        "Leave clear open foreground space for two separately composited animated characters."
+    )
+
+
+def character_prompt(character: dict[str, Any]) -> str:
+    return (
+        f"{STYLE_LOCK} Isolated full-body character cutout of {character.get('name')}: "
+        f"{character.get('appearance', '')}; wearing exactly {character.get('wardrobe', '')}. "
+        "Standing in a relaxed three-quarter pose, both complete hands and both complete shoes visible, "
+        "arms slightly away from the torso for animation, friendly natural expression, looking toward "
+        "camera, single character only. Perfectly uniform pure white studio background, no floor, "
+        "no scenery, no props, no cast shadow, no text, no border. Keep this exact character design."
     )
 
 
@@ -122,13 +124,17 @@ class PollinationsImageProvider:
         self.model = os.getenv("POLLINATIONS_IMAGE_MODEL", "zimage").strip() or "zimage"
         self.key = os.getenv("POLLINATIONS_API_KEY", "").strip()
 
-    def generate(self, prompt: str, destination: Path) -> None:
-        seed = int(hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8], 16) % 2_147_483_647
+    def generate(
+        self, prompt: str, destination: Path, *, seed_material: str | None = None,
+        width: int = 1280, height: int = 720,
+    ) -> None:
+        seed_source = seed_material or prompt
+        seed = int(hashlib.sha256(seed_source.encode("utf-8")).hexdigest()[:8], 16) % 2_147_483_647
         url = f"{self.base_url}/image/{quote(prompt, safe='')}"
         params = {
             "model": self.model,
-            "width": 1280,
-            "height": 720,
+            "width": width,
+            "height": height,
             "seed": seed,
             "safe": "true",
         }
@@ -148,7 +154,7 @@ class PollinationsImageProvider:
                     with destination.open("wb") as output:
                         for chunk in response.iter_bytes():
                             output.write(chunk)
-                _validate_image(destination)
+                _validate_image(destination, expected_ratio=width / height)
                 return
             except Exception as error:
                 last_error = error
@@ -169,26 +175,51 @@ def _download_image(url: str, destination: Path) -> None:
     _validate_image(destination)
 
 
-def _validate_image(path: Path) -> None:
+def _validate_image(path: Path, expected_ratio: float = 16 / 9) -> None:
     if path.stat().st_size < 100_000:
         raise RuntimeError(f"Generated image is suspiciously small: {path.stat().st_size} bytes")
     with Image.open(path) as image:
         width, height = image.size
-        if width < 1024 or height < 576:
+        if width < 720 or height < 576:
             raise RuntimeError(f"Generated image resolution is too small: {width}x{height}")
-        if abs(width / height - 16 / 9) > .12:
+        if abs(width / height - expected_ratio) > .12:
             raise RuntimeError(f"Generated image has wrong aspect ratio: {width}x{height}")
 
 
-def generate_scene_images(package: dict[str, Any], workdir: Path) -> tuple[list[Path], str]:
+def _extract_white_background(source: Path, destination: Path) -> None:
+    with Image.open(source) as opened:
+        image = opened.convert("RGBA")
+    pixels = []
+    for red, green, blue, _ in image.getdata():
+        low, high = min(red, green, blue), max(red, green, blue)
+        whiteness = min(255, max(0, (low - 170) * 3))
+        neutrality = min(255, max(0, 255 - (high - low) * 7))
+        pixels.append(255 - min(whiteness, neutrality))
+    alpha = Image.new("L", image.size)
+    alpha.putdata(pixels)
+    image.putalpha(alpha)
+    bbox = alpha.getbbox()
+    if not bbox:
+        raise RuntimeError("Generated character contains no extractable foreground")
+    margin = 24
+    bbox = (
+        max(0, bbox[0] - margin), max(0, bbox[1] - margin),
+        min(image.width, bbox[2] + margin), min(image.height, bbox[3] + margin),
+    )
+    image.crop(bbox).save(destination, "PNG", optimize=True)
+
+
+def generate_visual_assets(
+    package: dict[str, Any], workdir: Path
+) -> tuple[list[Path], dict[str, Path], str]:
     requested = os.getenv("SCENE_IMAGE_PROVIDER", "auto").strip().lower()
     paid_allowed = os.getenv("ALLOW_PAID_IMAGE_API", "false").lower() == "true"
     # "auto" must always remain genuinely zero-cost, even when old paid keys exist.
     provider_name = "pollinations" if requested == "auto" else requested
     if provider_name not in {"pollinations", "krea", "google"}:
-        return [], "illustrated-static-fallback"
+        return [], {}, "illustrated-static-fallback"
     if provider_name in {"krea", "google"} and not paid_allowed:
-        return [], f"{provider_name}-blocked-by-zero-cost-guard"
+        return [], {}, f"{provider_name}-blocked-by-zero-cost-guard"
     provider = (
         KreaImageProvider() if provider_name == "krea" else
         GoogleImageProvider() if provider_name == "google" else
@@ -197,6 +228,34 @@ def generate_scene_images(package: dict[str, Any], workdir: Path) -> tuple[list[
     images: list[Path] = []
     for index, scene in enumerate(package.get("scenes") or []):
         destination = workdir / f"generated-scene-{index:02d}.png"
-        provider.generate(visual_prompt(scene, package), destination)
+        prompt = background_prompt(scene, package)
+        if isinstance(provider, PollinationsImageProvider):
+            provider.generate(prompt, destination)
+        else:
+            provider.generate(prompt, destination)
         images.append(destination)
+    characters: dict[str, Path] = {}
+    for index, character in enumerate(package.get("character_bible") or []):
+        name = str(character.get("name", f"character-{index}"))
+        raw = workdir / f"generated-character-{index:02d}-raw.png"
+        destination = workdir / f"generated-character-{index:02d}.png"
+        prompt = character_prompt(character)
+        if isinstance(provider, PollinationsImageProvider):
+            identity = "|".join((
+                name, str(character.get("appearance", "")), str(character.get("wardrobe", "")),
+            ))
+            provider.generate(
+                prompt, raw, seed_material=identity, width=768, height=1024,
+            )
+            _extract_white_background(raw, destination)
+        else:
+            provider.generate(prompt, raw)
+            _extract_white_background(raw, destination)
+        characters[name] = destination
+    return images, characters, provider_name
+
+
+def generate_scene_images(package: dict[str, Any], workdir: Path) -> tuple[list[Path], str]:
+    """Compatibility wrapper for older callers."""
+    images, _, provider_name = generate_visual_assets(package, workdir)
     return images, provider_name
