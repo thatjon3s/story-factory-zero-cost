@@ -21,6 +21,7 @@ import httpx
 from cost_guard import CostGuard
 from memory import SupabaseMemory, slugify
 from puppet_renderer import render_contact_sheet, render_puppet_master
+from scene_image_provider import generate_scene_images
 from screenplay import finalize_package
 from supabase_control import SupabaseControlPlane
 
@@ -336,6 +337,9 @@ wunsch, hindernis, reaktion, versuch, rueckschlag, verstehen, loesung, schlussga
 `props` enthält jedes sichtbare und erwähnte Handlungsobjekt der Szene. Ein Objekt bleibt in den Folgeszenen
 vorhanden, solange es nicht sichtbar weggelegt oder mitgenommen wird. Jede `action` beschreibt eine körperlich
 sichtbare Handlung mit einem eindeutigen Verb. Gedanken, Erklärungen und Zustände allein sind keine Handlung.
+`visual_prompt` ist ein ausführlicher englischer 16:9-Bildprompt für genau den sichtbaren Moment der Szene.
+Er wiederholt die vollständige Erscheinung und Kleidung von Mia und Noah, nennt Handlung, Mimik, Kamerawinkel,
+Licht und Schauplatz und verbietet Text, Logos, zusätzliche Personen sowie verformte Hände.
 Gib ausschließlich valides JSON zurück."""
     schema = {
         "type": "object",
@@ -367,6 +371,7 @@ Gib ausschließlich valides JSON zurück."""
                         ]},
                         "props": {"type": "array", "items": {"type": "string"}},
                         "location": {"type": "string"}, "action": {"type": "string"},
+                        "visual_prompt": {"type": "string"},
                         "camera": {"type": "string"}, "lighting": {"type": "string"},
                         "dialogue": {
                             "type": "array", "minItems": 1, "maxItems": 4,
@@ -383,7 +388,8 @@ Gib ausschließlich valides JSON zurück."""
                         "state_after": {"type": "object"},
                     },
                     "required": [
-                        "duration_seconds", "beat", "props", "location", "action", "camera", "lighting",
+                        "duration_seconds", "beat", "props", "location", "action", "visual_prompt",
+                        "camera", "lighting",
                         "dialogue", "state_before", "state_after",
                     ],
                 },
@@ -753,19 +759,28 @@ def produce(control: ControlPlane) -> None:
         deadline = datetime.now(timezone.utc) + timedelta(hours=72)
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp); video = workdir / "episode-master-16x9.mp4"
+            scene_images, image_provider = generate_scene_images(package, workdir)
             package = {
                 **package,
-                "visual_mode": "premium-illustrated-storybook-v3",
-                "generation_token": f"ILLUSTRATED-V3-{package['revision'][:8].upper()}",
+                "visual_mode": (
+                    f"prompt-generated-storyboards-{image_provider}"
+                    if scene_images else "premium-illustrated-storybook-v3"
+                ),
+                "image_provider": image_provider,
+                "generation_token": (
+                    f"DYNAMIC-{image_provider.upper()}-{package['revision'][:8].upper()}"
+                    if scene_images else
+                    f"FALLBACK-{image_provider.upper()}-{package['revision'][:8].upper()}"
+                ),
             }
             contact_sheet = workdir / "storyboard-contact-sheet.jpg"
-            quality = render_contact_sheet(package, contact_sheet)
+            quality = render_contact_sheet(package, contact_sheet, scene_images)
             if quality["mean_saturation"] < 45:
                 raise RuntimeError(f"Storyboard quality gate: colors are too weak ({quality})")
             if quality["mean_scene_difference"] < 2.0:
                 raise RuntimeError(f"Storyboard quality gate: scenes are too repetitive ({quality})")
             control.event("storyboard_quality_passed", episode["id"], **quality)
-            render_puppet_master(package, video, workdir)
+            render_puppet_master(package, video, workdir, scene_images)
             artifact_dir = os.getenv("RENDER_ARTIFACT_DIR")
             if artifact_dir:
                 artifact_path = Path(artifact_dir)
