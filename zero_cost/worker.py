@@ -182,7 +182,7 @@ def telegram_review(
     revision = package["revision"]
     keyboard = {"inline_keyboard": [[
         {"text": "✅ Freigeben", "callback_data": f"approve:{episode_id}:{revision}"},
-        {"text": "❌ Ablehnen", "callback_data": f"reject:{episode_id}:{revision}"},
+        {"text": "✍️ Ablehnen / ändern", "callback_data": f"reject:{episode_id}:{revision}"},
     ]]}
     caption = (
         f"🎬 {package['title']}\n\n"
@@ -220,6 +220,34 @@ def telegram_review(
             timeout=30,
         )
         response.raise_for_status()
+    script_lines = [
+        f"📝 SZENENSKRIPT · Folge #{episode_id}",
+        "Antworte bei einem Logikfehler mit:",
+        f"/revise {episode_id} DEINE KONKRETE ÄNDERUNGSANWEISUNG",
+    ]
+    for index, scene in enumerate(package.get("scenes") or [], 1):
+        script_lines.extend([
+            "",
+            f"Szene {index} · {scene.get('beat', '')}",
+            f"Handlung: {scene.get('action', '')}",
+        ])
+        for beat in scene.get("dialogue") or []:
+            script_lines.append(
+                f"{beat.get('speaker', '?')} ({beat.get('emotion', '')}): {beat.get('text', '')}"
+            )
+    script_text = "\n".join(script_lines)
+    while script_text:
+        split_at = min(3900, len(script_text))
+        if split_at < len(script_text):
+            split_at = script_text.rfind("\n", 0, split_at)
+            if split_at < 1:
+                split_at = 3900
+        httpx.post(
+            f"{api}/sendMessage",
+            json={"chat_id": chat, "text": script_text[:split_at]},
+            timeout=30,
+        ).raise_for_status()
+        script_text = script_text[split_at:].lstrip()
 
 
 def process_telegram_callbacks(control: ControlPlane) -> None:
@@ -229,7 +257,7 @@ def process_telegram_callbacks(control: ControlPlane) -> None:
     api = f"https://api.telegram.org/bot{token}"
     response = httpx.get(
         f"{api}/getUpdates",
-        params={"timeout": 0, "allowed_updates": json.dumps(["callback_query"])},
+        params={"timeout": 0, "allowed_updates": json.dumps(["callback_query", "message"])},
         timeout=30,
     )
     response.raise_for_status()
@@ -237,6 +265,42 @@ def process_telegram_callbacks(control: ControlPlane) -> None:
     if not updates:
         return
     for update in updates:
+        incoming = update.get("message") or {}
+        incoming_chat = str((incoming.get("chat") or {}).get("id", ""))
+        incoming_text = str(incoming.get("text") or "").strip()
+        revision_command = re.fullmatch(
+            r"/revise(?:@\w+)?\s+(\d+)\s+(.+)", incoming_text, flags=re.DOTALL | re.IGNORECASE
+        )
+        if incoming_chat == str(allowed_chat) and revision_command:
+            episode_id = int(revision_command.group(1))
+            instruction = revision_command.group(2).strip()
+            episode = control.get(episode_id)
+            if episode.get("status") == "awaiting_approval":
+                revision = (episode.get("package") or {}).get("revision", "")
+                control.update(
+                    episode_id,
+                    {"status": "rejected", "rejected_reason": instruction},
+                    "awaiting_approval",
+                )
+                control.event(
+                    "telegram_revision_requested", episode_id,
+                    revision=revision, instruction=instruction,
+                )
+                response_text = (
+                    f"✅ Änderungsauftrag für Folge #{episode_id} gespeichert.\n\n"
+                    f"{instruction}\n\nDie nächste Serverproduktion schreibt das Skript damit neu."
+                )
+            else:
+                response_text = (
+                    f"Folge #{episode_id} wartet nicht mehr auf Prüfung. "
+                    "Die Anweisung wurde deshalb nicht übernommen."
+                )
+            httpx.post(
+                f"{api}/sendMessage",
+                json={"chat_id": incoming_chat, "text": response_text},
+                timeout=30,
+            ).raise_for_status()
+            continue
         query = update.get("callback_query") or {}
         query_id = query.get("id")
         message = query.get("message") or {}
@@ -260,13 +324,22 @@ def process_telegram_callbacks(control: ControlPlane) -> None:
                 control.event("telegram_approved", episode_id, revision=revision)
                 answer, accepted = "Freigegeben – die Veröffentlichung wird automatisch geplant.", True
             else:
-                control.update(
-                    episode_id,
-                    {"status": "rejected", "rejected_reason": "Über Telegram abgelehnt"},
-                    "awaiting_approval",
+                answer = (
+                    f"Sende jetzt: /revise {episode_id} DEINE ÄNDERUNGSANWEISUNG"
                 )
-                control.event("telegram_rejected", episode_id, revision=revision)
-                answer, accepted = "Abgelehnt – eine neue Fassung wird automatisch produziert.", True
+                httpx.post(
+                    f"{api}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": (
+                            f"Folge #{episode_id} wird noch nicht neu produziert. "
+                            "Schreibe zuerst, was logisch oder dramaturgisch geändert werden soll:\n\n"
+                            f"/revise {episode_id} Beispiel: In Szene 3 weiß Noah noch nichts "
+                            "vom Papierboot. Lass Mia es ihm dort erst zeigen."
+                        ),
+                    },
+                    timeout=30,
+                ).raise_for_status()
         if query_id:
             httpx.post(
                 f"{api}/answerCallbackQuery",
@@ -302,6 +375,8 @@ def ollama_story(episode: dict[str, Any]) -> dict[str, Any]:
 Universum: {episode.get('universe_name', 'Story Factory Universe')}
 Serie: {episode['series_name']}, Folge {episode['episode_no']}.
 Prämisse: {episode['premise'] or episode['title']}.
+Verbindlicher Änderungsauftrag der menschlichen Redaktion:
+{episode.get('rejected_reason') or 'Keiner; schreibe eine neue, eigenständige Folge.'}
 
 {canon.prompt_block()}
 
@@ -740,15 +815,18 @@ def produce(control: ControlPlane) -> None:
     control.update(episode["id"], {"status": "producing"}, episode["status"])
     try:
         existing_package = episode.get("package") or {}
+        rewrite_requested = bool(str(episode.get("rejected_reason") or "").strip())
         if (
             existing_package.get("package_version") == 2
             and existing_package.get("story_profile") == "social-kindness-v3"
+            and not rewrite_requested
         ):
             package = existing_package
         else:
             package = ollama_story(episode)
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
+                "rejected_reason": "",
             }, "producing")
             control.event(
                 "story_checkpointed", episode["id"],
