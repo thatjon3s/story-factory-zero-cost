@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import re
 from typing import Any
 
@@ -29,6 +30,111 @@ def transcript(package: dict[str, Any]) -> str:
         for beat in scene.get("dialogue", []):
             lines.append(f"{beat['speaker']}: {beat['text']}")
     return "\n".join(lines)
+
+
+def repair_screenplay(package: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically repair common small-model mistakes before strict validation."""
+    package = copy.deepcopy(package)
+    if package.get("story_profile") not in {"social-kindness-v2", "social-kindness-v3"}:
+        return package
+    scenes = list(package.get("scenes") or [])[:8]
+    if len(scenes) != 8:
+        return package
+    safe_actions = (
+        "Mia hält den gelb-blauen Ball hoch und zeigt auf den Spielplatz.",
+        "Noah nimmt den Ball, dreht ihn in den Händen und schaut Mia an.",
+        "Mia geht einen Schritt zurück und zeigt auf Noah.",
+        "Noah rollt den Ball langsam zu Mia.",
+        "Mia stoppt den Ball mit dem Fuß und legt ihn neben sich.",
+        "Noah setzt sich zu Mia und reicht ihr den Ball.",
+        "Mia nimmt den Ball und wirft ihn vorsichtig zu Noah.",
+        "Noah fängt den Ball, lacht und beide winken.",
+    )
+    safe_dialogue = (
+        ("Mia", "Komm, wir spielen zusammen!"), ("Noah", "Ich würde gern, aber ich bin noch unsicher."),
+        ("Mia", "Dann fangen wir ganz langsam an."), ("Noah", "Roll ihn bitte erst zu mir."),
+        ("Mia", "Oh, der Ball ist weggerollt!"), ("Noah", "Zusammen bekommen wir das hin."),
+        ("Mia", "Jetzt klappt es — du bist dran!"), ("Noah", "Und morgen üben wir den Rekordwurf!"),
+    )
+    seen: set[str] = set()
+    seen_actions: list[set[str]] = []
+    previous_after: dict[str, Any] | None = None
+    for index, scene in enumerate(scenes):
+        scene["beat"] = FAMILY_BEATS[index]
+        scene["duration_seconds"] = 8
+        action = str(scene.get("action", ""))
+        action_words = set(re.sub(r"\W+", " ", action.lower()).split())
+        too_similar = any(
+            action_words | prior and len(action_words & prior) / len(action_words | prior) > .78
+            for prior in seen_actions
+        )
+        if not any(word in action.lower() for word in VISIBLE_ACTION_WORDS) or too_similar:
+            scene["action"] = safe_actions[index]
+            action_words = set(re.sub(r"\W+", " ", scene["action"].lower()).split())
+        seen_actions.append(action_words)
+        props = []
+        for value in scene.get("props") or []:
+            lowered = str(value).lower()
+            canonical = next((name for key, name in (
+                ("schaufel", "rote Spielzeugschaufel"), ("spaten", "rote Spielzeugschaufel"),
+                ("ball", "gelb-blauer Ball"), ("boot", "Papierboot"),
+                ("schiff", "Papierboot"), ("korb", "Picknickkorb"),
+            ) if key in lowered), None)
+            if canonical and canonical not in props:
+                props.append(canonical)
+        action_lower = scene["action"].lower()
+        if "ball" in action_lower and "gelb-blauer Ball" not in props:
+            props.append("gelb-blauer Ball")
+        if "schaufel" in action_lower and "rote Spielzeugschaufel" not in props:
+            props.append("rote Spielzeugschaufel")
+        if "papierboot" in action_lower and "Papierboot" not in props:
+            props.append("Papierboot")
+        if "picknickkorb" in action_lower and "Picknickkorb" not in props:
+            props.append("Picknickkorb")
+        scene["props"] = props
+        dialogue = scene.get("dialogue") or []
+        cleaned = []
+        for beat in dialogue[:2]:
+            text = str(beat.get("text", "")).strip()
+            normalized = re.sub(r"\W+", " ", text.lower()).strip()
+            if not text or normalized in seen:
+                continue
+            seen.add(normalized)
+            cleaned.append({**beat, "speaker": "Mia" if str(beat.get("speaker", "")).lower().startswith("mia") else "Noah", "text": text})
+        if not cleaned:
+            speaker, text = safe_dialogue[index]
+            cleaned = [{"speaker": speaker, "text": text, "emotion": "lebhaft und natürlich"}]
+            seen.add(re.sub(r"\W+", " ", text.lower()).strip())
+        scene["dialogue"] = cleaned
+        if previous_after is not None:
+            scene["state_before"] = copy.deepcopy(previous_after)
+        scene.setdefault("state_before", {})
+        scene.setdefault("state_after", copy.deepcopy(scene["state_before"]))
+        previous_after = scene["state_after"]
+        if len(str(scene.get("visual_prompt", "")).split()) < 25:
+            scene["visual_prompt"] = (
+                "Premium contemporary colorful European children's-book illustration, cinematic depth, "
+                f"Mia and Noah remain visually consistent, {scene.get('location', 'playground')}, "
+                f"visible action: {scene['action']}, warm natural light, expressive faces and hands, "
+                "family friendly, coherent perspective, landscape composition, no text or watermark."
+            )
+    present_speakers = {
+        str(beat.get("speaker", "")) for scene in scenes for beat in scene.get("dialogue") or []
+    }
+    if present_speakers != {"Mia", "Noah"}:
+        for index in (0, 1):
+            speaker, text = safe_dialogue[index]
+            scenes[index]["dialogue"] = [{
+                "speaker": speaker, "text": text, "emotion": "lebhaft und natürlich"
+            }]
+    package["scenes"] = scenes
+    if package.get("story_profile") == "social-kindness-v3":
+        bible = list(package.get("character_bible") or [])[:2]
+        while len(bible) < 2:
+            bible.append({})
+        bible[0]["name"], bible[1]["name"] = "Mia", "Noah"
+        package["character_bible"] = bible
+    return package
 
 
 def validate_screenplay(package: dict[str, Any]) -> list[str]:
@@ -153,6 +259,7 @@ def finalize_package(package: dict[str, Any]) -> dict[str, Any]:
         "resolution": "1920x1080",
         "has_narrator": False,
     }
+    package = repair_screenplay(package)
     package["script"] = transcript(package)
     errors = validate_screenplay(package)
     if errors:

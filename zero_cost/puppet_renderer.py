@@ -11,11 +11,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 
 WIDTH, HEIGHT = 1280, 720
-FPS = int(os.getenv("PUPPET_FPS", "24"))
+FPS = int(os.getenv("PUPPET_FPS", "30"))
 ASSET_DIR = Path(__file__).with_name("assets")
 
 
@@ -362,36 +362,71 @@ def _generated_sprite(path: str) -> Image.Image:
     return image.crop(bbox) if bbox else image
 
 
-def _blend_generated_poses(
+def _polygon_part(sprite: Image.Image, points: list[tuple[float, float]]) -> tuple[Image.Image, Image.Image]:
+    """Extract one opaque body part. The returned mask is also removed from the body.
+
+    Every source pixel therefore belongs to one layer only; unlike pose crossfades this
+    cannot produce translucent duplicate people or motion trails.
+    """
+    mask = Image.new("L", sprite.size)
+    ImageDraw.Draw(mask).polygon(points, fill=255)
+    mask = ImageChops.multiply(mask, sprite.getchannel("A"))
+    part = Image.new("RGBA", sprite.size)
+    part.paste(sprite, mask=mask)
+    return part, mask
+
+
+def _rig_generated_sprite(
     paths: dict[str, Path], pose: str, time: float, speaking: bool
 ) -> Image.Image:
-    target = "action" if pose in {"walk", "share"} else "talk" if (
-        speaking or pose in {"talk", "celebrate"}
-    ) else "neutral"
-    neutral = _generated_sprite(str(paths["neutral"].resolve()))
-    selected = _generated_sprite(str(paths[target].resolve()))
-    if target == "neutral":
-        return neutral
-    canvas_size = (
-        max(neutral.width, selected.width),
-        max(neutral.height, selected.height),
-    )
+    """Animate a single generated cutout as a deterministic articulated 2-D rig."""
+    source = _generated_sprite(str(paths["neutral"].resolve())).copy()
+    w, h = source.size
+    definitions = {
+        "left_leg": ([(.27*w,.55*h),(.50*w,.55*h),(.49*w,h),(.19*w,h)], (.40*w,.58*h)),
+        "right_leg": ([(.50*w,.55*h),(.73*w,.55*h),(.81*w,h),(.51*w,h)], (.60*w,.58*h)),
+        "left_arm": ([(.12*w,.27*h),(.39*w,.27*h),(.38*w,.66*h),(.14*w,.72*h),(.05*w,.52*h)], (.31*w,.30*h)),
+        "right_arm": ([(.61*w,.27*h),(.88*w,.27*h),(.95*w,.52*h),(.86*w,.72*h),(.62*w,.66*h)], (.69*w,.30*h)),
+        "head": ([(.23*w,0),(.77*w,0),(.79*w,.31*h),(.21*w,.31*h)], (.50*w,.27*h)),
+    }
+    parts: dict[str, tuple[Image.Image, tuple[float, float]]] = {}
+    combined = Image.new("L", source.size)
+    for name, (points, pivot) in definitions.items():
+        part, mask = _polygon_part(source, points)
+        # Polygon joints overlap deliberately, but a source pixel must never be
+        # drawn twice. Assign every pixel to the first matching body segment.
+        mask = ImageChops.subtract(mask, combined)
+        part.putalpha(mask)
+        parts[name] = (part, pivot)
+        combined = ImageChops.lighter(combined, mask)
+    body = source.copy()
+    body.putalpha(ImageChops.subtract(source.getchannel("A"), combined))
 
-    def centered(sprite: Image.Image) -> Image.Image:
-        canvas = Image.new("RGBA", canvas_size)
-        canvas.alpha_composite(
-            sprite,
-            ((canvas.width - sprite.width) // 2, canvas.height - sprite.height),
-        )
-        return canvas
-
-    # Full crossfades reveal small differences between generated poses as
-    # flipbook jitter. Keep the neutral pose dominant and add slow micro-motion.
-    wave = .5 - .5 * math.cos(time * (2.35 if speaking else 1.35))
-    factor = (.13 + .09 * wave) if speaking else (.08 + .07 * wave)
-    if pose in {"walk", "share"}:
-        factor += .05
-    return Image.blend(centered(neutral), centered(selected), factor)
+    cadence = 2.8 if speaking else 1.35
+    wave = math.sin(time * cadence * math.pi)
+    if pose == "walk":
+        arm, leg, head = 8.0 * wave, 6.0 * wave, 1.2 * wave
+    elif pose in {"share", "celebrate"}:
+        arm, leg, head = (10.0 if pose == "celebrate" else 6.0) * wave, 1.4 * wave, 1.8 * wave
+    elif speaking:
+        arm, leg, head = 5.5 * wave, .8 * wave, 1.6 * wave
+    else:
+        arm, leg, head = 1.2 * wave, .45 * wave, .7 * wave
+    angles = {
+        "left_leg": leg, "right_leg": -leg,
+        "left_arm": -arm, "right_arm": arm,
+        "head": head,
+    }
+    canvas = Image.new("RGBA", source.size)
+    # Rear limbs, torso, then front limbs/head gives a stable paper-puppet depth order.
+    for name in ("left_leg", "right_leg"):
+        part, pivot = parts[name]
+        canvas.alpha_composite(part.rotate(angles[name], Image.Resampling.BICUBIC, center=pivot))
+    canvas.alpha_composite(body)
+    for name in ("left_arm", "right_arm", "head"):
+        part, pivot = parts[name]
+        canvas.alpha_composite(part.rotate(angles[name], Image.Resampling.BICUBIC, center=pivot))
+    return canvas
 
 
 @lru_cache(maxsize=8)
@@ -503,7 +538,7 @@ def render_storyboard_frame(
             x += (entrance - 1) * (180 if index == 0 else -180)
         sprite_paths = (character_images or {}).get(name)
         sprite = (
-            _blend_generated_poses(sprite_paths, pose, time, speaking)
+            _rig_generated_sprite(sprite_paths, pose, time, speaking)
             if sprite_paths is not None else _illustrated_sprite(name, pose)
         )
         _composite_character(
@@ -560,9 +595,7 @@ def render_puppet_master(
         [
             "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{WIDTH}x{HEIGHT}",
             "-r", str(FPS), "-i", "-", "-i", str(audio), "-map", "0:v", "-map", "1:a",
-            "-vf",
-            "minterpolate=fps=48:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
-            "scale=1920:1080:flags=lanczos",
+            "-vf", "scale=1920:1080:flags=lanczos",
             "-c:v", "libx264", "-preset", "slow",
             "-crf", "17", "-profile:v", "high", "-level:v", "4.2",
             "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
@@ -598,9 +631,9 @@ def render_puppet_master(
         if (
             (stream.get("width"), stream.get("height"), stream.get("pix_fmt"))
             != (1920, 1080, "yuv420p")
-            or stream.get("r_frame_rate") != "48/1"
+            or stream.get("r_frame_rate") != f"{FPS}/1"
         ):
-            raise RuntimeError(f"Final master is not validated 1080p 48fps yuv420p: {stream}")
+            raise RuntimeError(f"Final master is not validated 1080p {FPS}fps yuv420p: {stream}")
     except Exception:
         process.kill()
         raise

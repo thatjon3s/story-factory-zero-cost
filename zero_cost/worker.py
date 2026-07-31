@@ -506,7 +506,7 @@ Gib ausschließlich valides JSON zurück."""
         "options": {"num_predict": 5000, "temperature": 0.65},
     }
     failures: list[str] = []
-    for attempt in range(4):
+    for attempt in range(2):
         try:
             response = httpx.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=1200)
             response.raise_for_status()
@@ -518,7 +518,7 @@ Gib ausschließlich valides JSON zurück."""
                 f"attempt {attempt + 1}: {type(exc).__name__}"
                 + (f" ({detail})" if detail else "")
             )
-            if attempt < 3:
+            if attempt < 1:
                 time.sleep(20 * (attempt + 1))
                 continue
             break
