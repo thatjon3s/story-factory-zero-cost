@@ -591,9 +591,11 @@ def render_puppet_master(
     character_images: dict[str, dict[str, Path]] | None = None,
 ) -> None:
     audio, cue_sets, durations = build_dialogue_track(package, workdir)
+    ffmpeg_log_path = workdir / "ffmpeg-render.log"
+    ffmpeg_log = ffmpeg_log_path.open("w+b")
     process = subprocess.Popen(
         [
-            "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{WIDTH}x{HEIGHT}",
+            "ffmpeg", "-y", "-loglevel", "warning", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{WIDTH}x{HEIGHT}",
             "-r", str(FPS), "-i", "-", "-i", str(audio), "-map", "0:v", "-map", "1:a",
             "-vf", "scale=1920:1080:flags=lanczos",
             "-c:v", "libx264", "-preset", "slow",
@@ -601,7 +603,7 @@ def render_puppet_master(
             "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", "-shortest", str(output),
         ],
-        stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE, stderr=ffmpeg_log,
     )
     try:
         for scene_index, (scene, duration, cues) in enumerate(zip(package["scenes"], durations, cue_sets)):
@@ -616,8 +618,10 @@ def render_puppet_master(
                     raise RuntimeError("FFmpeg frame pipe closed")
                 process.stdin.write(frame.tobytes())
         process.stdin.close()
-        stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
         if process.wait(timeout=7200):
+            ffmpeg_log.flush()
+            ffmpeg_log.seek(0)
+            stderr = ffmpeg_log.read().decode(errors="replace")
             raise RuntimeError(f"FFmpeg cutout render failed: {stderr[-2000:]}")
         probe = subprocess.run(
             [
@@ -637,3 +641,5 @@ def render_puppet_master(
     except Exception:
         process.kill()
         raise
+    finally:
+        ffmpeg_log.close()
