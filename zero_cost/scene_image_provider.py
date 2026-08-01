@@ -267,6 +267,43 @@ def _extract_background(source: Path, destination: Path) -> None:
     alpha = Image.new("L", image.size)
     alpha.putdata(pixels)
     alpha = alpha.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(.55))
+
+    # A sprite cell contains exactly one actor. Image generators nevertheless
+    # sometimes draw a panel divider, a detached cast shadow or a faint duplicate
+    # beside the actor. Those objects survive colour-keying because they are dark.
+    # Keep only the largest connected foreground object and its antialiased rim.
+    opaque = alpha.point(lambda value: 255 if value >= 28 else 0)
+    opaque_pixels = opaque.load()
+    visited = bytearray(width * height)
+    largest: list[tuple[int, int]] = []
+    for seed_y in range(height):
+        for seed_x in range(width):
+            offset = seed_y * width + seed_x
+            if visited[offset] or not opaque_pixels[seed_x, seed_y]:
+                continue
+            component: list[tuple[int, int]] = []
+            component_queue: deque[tuple[int, int]] = deque(((seed_x, seed_y),))
+            visited[offset] = 1
+            while component_queue:
+                x, y = component_queue.popleft()
+                component.append((x, y))
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if nx < 0 or nx >= width or ny < 0 or ny >= height:
+                        continue
+                    neighbour = ny * width + nx
+                    if visited[neighbour] or not opaque_pixels[nx, ny]:
+                        continue
+                    visited[neighbour] = 1
+                    component_queue.append((nx, ny))
+            if len(component) > len(largest):
+                largest = component
+    if largest:
+        retained = Image.new("L", image.size)
+        retained_pixels = retained.load()
+        for x, y in largest:
+            retained_pixels[x, y] = 255
+        retained = retained.filter(ImageFilter.MaxFilter(5))
+        alpha = Image.composite(alpha, Image.new("L", image.size), retained)
     image.putalpha(alpha)
     if green_screen:
         cleaned = []
