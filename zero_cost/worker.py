@@ -825,7 +825,20 @@ def produce(control: ControlPlane) -> None:
             and existing_package.get("story_profile") == "social-kindness-v3"
             and not rewrite_requested
         ):
-            package = existing_package
+            # Re-run deterministic validation for checkpointed packages as the
+            # screenplay schema and canonical cast evolve.  Otherwise a failed
+            # production can indefinitely recycle the exact package that caused
+            # the visual/continuity defect in the first place.
+            package = finalize_package(existing_package)
+            if package != existing_package:
+                control.update(episode["id"], {
+                    "title": package["title"], "script": package["script"], "package": package,
+                }, "producing")
+                control.event(
+                    "story_package_migrated", episode["id"],
+                    revision=package["revision"],
+                    dialogue_words=len(package["script"].split()),
+                )
         else:
             package = ollama_story(episode)
             control.update(episode["id"], {
