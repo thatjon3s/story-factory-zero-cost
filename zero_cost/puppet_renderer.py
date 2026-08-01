@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageStat
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 
 WIDTH, HEIGHT = 1280, 720
@@ -367,81 +367,22 @@ def _generated_sprite(path: str) -> Image.Image:
     return image.crop(bbox) if bbox else image
 
 
-def _polygon_part(sprite: Image.Image, points: list[tuple[float, float]]) -> tuple[Image.Image, Image.Image]:
-    """Extract one opaque body part. The returned mask is also removed from the body.
-
-    Every source pixel therefore belongs to one layer only; unlike pose crossfades this
-    cannot produce translucent duplicate people or motion trails.
-    """
-    mask = Image.new("L", sprite.size)
-    ImageDraw.Draw(mask).polygon(points, fill=255)
-    mask = ImageChops.multiply(mask, sprite.getchannel("A"))
-    part = Image.new("RGBA", sprite.size)
-    part.paste(sprite, mask=mask)
-    return part, mask
-
-
-def _rig_generated_sprite(
+def _keyframed_generated_sprite(
     paths: dict[str, Path], pose: str, time: float, speaking: bool
 ) -> Image.Image:
-    """Animate a single generated cutout as a deterministic articulated 2-D rig."""
-    source = _generated_sprite(str(paths["neutral"].resolve())).copy()
-    w, h = source.size
-    if speaking:
-        # A small rhythmic mouth overlay makes speech visibly character-bound
-        # without generating and crossfading a second translucent face.
-        openness = .010 + .018 * abs(math.sin(time * 12.0))
-        draw = ImageDraw.Draw(source)
-        draw.ellipse(
-            (.465*w, .225*h, .535*w, (.225+openness)*h),
-            fill=(104, 34, 45, 235), outline=(55, 25, 31, 245),
-            width=max(1, round(w * .006)),
-        )
-    definitions = {
-        # Only distal limbs move. Keeping shoulders, hips, head and torso in one
-        # opaque layer prevents the paper-cut seams seen with coarse full-limb masks.
-        "left_leg": ([(.25*w,.66*h),(.49*w,.66*h),(.47*w,h),(.18*w,h)], (.40*w,.68*h)),
-        "right_leg": ([(.51*w,.66*h),(.75*w,.66*h),(.82*w,h),(.53*w,h)], (.60*w,.68*h)),
-        "left_arm": ([(.06*w,.39*h),(.29*w,.39*h),(.30*w,.70*h),(.08*w,.73*h)], (.23*w,.41*h)),
-        "right_arm": ([(.71*w,.39*h),(.94*w,.39*h),(.92*w,.73*h),(.70*w,.70*h)], (.77*w,.41*h)),
-    }
-    parts: dict[str, tuple[Image.Image, tuple[float, float]]] = {}
-    combined = Image.new("L", source.size)
-    for name, (points, pivot) in definitions.items():
-        part, mask = _polygon_part(source, points)
-        # Polygon joints overlap deliberately, but a source pixel must never be
-        # drawn twice. Assign every pixel to the first matching body segment.
-        mask = ImageChops.subtract(mask, combined)
-        part.putalpha(mask)
-        parts[name] = (part, pivot)
-        combined = ImageChops.lighter(combined, mask)
-    body = source.copy()
-    body.putalpha(ImageChops.subtract(source.getchannel("A"), combined))
+    """Limited animation with opaque generated poses and zero double exposure.
 
-    cadence = 2.8 if speaking else 1.35
-    wave = math.sin(time * cadence * math.pi)
-    if pose == "walk":
-        arm, leg = 10.0 * wave, 7.0 * wave
-    elif pose in {"share", "celebrate"}:
-        arm, leg = (14.0 if pose == "celebrate" else 9.0) * wave, 2.0 * wave
+    Each frame contains exactly one complete body. This trades synthetic optical-flow
+    smearing for clean, intentional storybook keyframes while the placement layer
+    continues to move smoothly at 30 fps.
+    """
+    if pose in {"walk", "share", "celebrate"}:
+        selected = "action"
     elif speaking:
-        arm, leg = 8.0 * wave, 1.2 * wave
+        selected = "talk" if int(time * 2.4) % 2 == 0 else "neutral"
     else:
-        arm, leg = 2.0 * wave, .7 * wave
-    angles = {
-        "left_leg": leg, "right_leg": -leg,
-        "left_arm": -arm, "right_arm": arm,
-    }
-    canvas = Image.new("RGBA", source.size)
-    # Rear limbs, torso, then front limbs/head gives a stable paper-puppet depth order.
-    for name in ("left_leg", "right_leg"):
-        part, pivot = parts[name]
-        canvas.alpha_composite(part.rotate(angles[name], Image.Resampling.BICUBIC, center=pivot))
-    canvas.alpha_composite(body)
-    for name in ("left_arm", "right_arm"):
-        part, pivot = parts[name]
-        canvas.alpha_composite(part.rotate(angles[name], Image.Resampling.BICUBIC, center=pivot))
-    return canvas
+        selected = "neutral"
+    return _generated_sprite(str(paths[selected].resolve())).copy()
 
 
 @lru_cache(maxsize=8)
@@ -553,7 +494,7 @@ def render_storyboard_frame(
             x += (entrance - 1) * (180 if index == 0 else -180)
         sprite_paths = (character_images or {}).get(name)
         sprite = (
-            _rig_generated_sprite(sprite_paths, pose, time, speaking)
+            _keyframed_generated_sprite(sprite_paths, pose, time, speaking)
             if sprite_paths is not None else _illustrated_sprite(name, pose)
         )
         _composite_character(
