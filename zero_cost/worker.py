@@ -170,13 +170,16 @@ def notify(subject: str, body: str) -> None:
 
 
 def telegram_review(
-    video: Path, episode_id: int, package: dict[str, Any], youtube_id: str, deadline: datetime
+    video: Path, episode_id: int, package: dict[str, Any], youtube_id: str | None, deadline: datetime
 ) -> None:
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN", ""), os.getenv("TELEGRAM_CHAT_ID", "")
     if not token or not chat:
         notify(
             f"Freigabe benötigt: {package['title']}",
-            f"Prüffassung: https://youtu.be/{youtube_id}\nFrist: {deadline.isoformat()}",
+            (
+                f"Prüffassung: https://youtu.be/{youtube_id}\n" if youtube_id else
+                "Prüffassung wurde direkt an Telegram übertragen.\n"
+            ) + f"Frist: {deadline.isoformat()}",
         )
         return
     revision = package["revision"]
@@ -192,7 +195,8 @@ def telegram_review(
         f"Token: {package.get('generation_token', package['revision'])}\n\n"
         f"Bitte bis {deadline.astimezone(TZ).strftime('%d.%m.%Y, %H:%M Uhr')} prüfen. "
         "Danach bleibt die Folge privat und eine Reservefolge übernimmt den Termin.\n"
-        f"Vorschau: https://youtu.be/{youtube_id}"
+        + (f"Vorschau: https://youtu.be/{youtube_id}" if youtube_id else
+           "YouTube-Upload: aufgeschoben (Google-Token muss erneuert werden)")
     )
     api = f"https://api.telegram.org/bot{token}"
     sent = False
@@ -865,13 +869,25 @@ def produce(control: ControlPlane) -> None:
                 artifact_path.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(video, artifact_path / "episode-master-16x9.mp4")
                 shutil.copy2(contact_sheet, artifact_path / contact_sheet.name)
-            youtube_id = YouTube().upload_private(video, package)
+            youtube_id: str | None = None
+            try:
+                youtube_id = YouTube().upload_private(video, package)
+            except Exception as upload_error:
+                # Rendering and human review must remain available when Google's
+                # revocable OAuth token is temporarily unavailable.
+                control.event(
+                    "youtube_upload_deferred", episode["id"], error=repr(upload_error)
+                )
             control.update(episode["id"], {
                 "title": package["title"], "script": package["script"], "package": package,
                 "preview_youtube_id": youtube_id, "approval_deadline": deadline.isoformat(),
                 "status": "awaiting_approval", "rejected_reason": "",
             }, "producing")
-            control.event("approval_requested", episode["id"], deadline=deadline.isoformat(), youtube_id=youtube_id)
+            control.event(
+                "approval_requested", episode["id"],
+                deadline=deadline.isoformat(), youtube_id=youtube_id,
+                delivery="youtube-and-telegram" if youtube_id else "telegram-direct",
+            )
             try:
                 telegram_review(video, episode["id"], package, youtube_id, deadline)
             except Exception as notify_error:
@@ -897,6 +913,16 @@ def schedule_approved(control: ControlPlane) -> None:
         if package.get("package_version") != 2:
             control.event("legacy_master_blocked", episode["id"])
             continue
+        if not episode.get("preview_youtube_id"):
+            marker = "youtube_token_refresh_required"
+            if not control.has_event(marker, episode["id"]):
+                control.event(marker, episode["id"])
+                notify(
+                    "YouTube-Autorisierung erneuern",
+                    f"Folge #{episode['id']} ist freigegeben, bleibt aber bis zur Erneuerung "
+                    "des Google-Refresh-Tokens unveröffentlicht.",
+                )
+            continue
         SupabaseMemory().commit_approved_episode(episode)
         control.event(
             "canon_committed", episode["id"],
@@ -921,7 +947,11 @@ def tick(control: ControlPlane) -> None:
             marker = f"approval_reminder_{threshold}h"
             if remaining <= threshold and remaining > 0 and not control.has_event(marker, episode["id"]):
                 control.event(marker, episode["id"], remaining_hours=remaining)
-                notify(f"Noch {threshold} Stunden: {episode['title']}", f"Prüffassung: https://youtu.be/{episode['preview_youtube_id']}")
+                preview = (
+                    f"https://youtu.be/{episode['preview_youtube_id']}"
+                    if episode.get("preview_youtube_id") else "direkt im Telegram-Video"
+                )
+                notify(f"Noch {threshold} Stunden: {episode['title']}", f"Prüffassung: {preview}")
         if remaining <= 0 and not control.has_event("approval_overdue", episode["id"]):
             control.event("approval_overdue", episode["id"])
             notify(f"Freigabe verpasst: {episode['title']}", "Die ungeprüfte Folge bleibt privat. Eine freigegebene Reservefolge übernimmt den nächsten freien Termin.")

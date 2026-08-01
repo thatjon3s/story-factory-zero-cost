@@ -129,11 +129,26 @@ def repair_screenplay(package: dict[str, Any]) -> dict[str, Any]:
             }]
     package["scenes"] = scenes
     if package.get("story_profile") == "social-kindness-v3":
-        bible = list(package.get("character_bible") or [])[:2]
-        while len(bible) < 2:
-            bible.append({})
-        bible[0]["name"], bible[1]["name"] = "Mia", "Noah"
-        package["character_bible"] = bible
+        package["character_bible"] = [
+            {
+                "name": "Mia", "voice": "hell, lebhaft, neugierig",
+                "appearance": (
+                    "seven-year-old girl, warm brown skin, expressive brown eyes, "
+                    "dark curly hair in two puff ponytails"
+                ),
+                "wardrobe": (
+                    "sunflower-yellow dungarees over a coral-red T-shirt, turquoise trainers"
+                ),
+            },
+            {
+                "name": "Noah", "voice": "warm, lebhaft, freundlich",
+                "appearance": (
+                    "eight-year-old boy, fair skin with freckles, expressive green eyes, "
+                    "tousled auburn hair"
+                ),
+                "wardrobe": "cobalt-blue hoodie, moss-brown shorts, bright orange trainers",
+            },
+        ]
     return package
 
 

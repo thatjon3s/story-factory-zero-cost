@@ -46,8 +46,9 @@ def character_prompt(character: dict[str, Any]) -> str:
         "Three equal columns showing exactly the same full-body character and identical clothing: "
         "left panel relaxed neutral pose, center panel lively speaking gesture with one arm raised, "
         "right panel stepping forward and reaching with both hands. Both complete hands and shoes "
-        "visible in every panel. Perfectly uniform pure chroma-key green #00FF00 background in all "
-        "three panels, no floor, scenery, props, separators, cast shadows, text or border."
+        "visible in every panel. Perfectly uniform pure white #FFFFFF background in all "
+        "three panels, thick clean dark outline around the complete silhouette, no floor, scenery, "
+        "props, separators, cast shadows, text or border. Never use white as a clothing color."
     )
 
 

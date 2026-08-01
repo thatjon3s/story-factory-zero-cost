@@ -326,6 +326,11 @@ def _illustrated_background(
         _external_asset(str(generated_scene.resolve()))
         if generated_scene is not None else _illustrated_asset("playground-lake.png")
     )
+    if generated_scene is not None:
+        # Generated environment plates occasionally contain tiny accidental figures.
+        # A cinematic depth-of-field treatment keeps them in the environment plane
+        # and visually separates the crisp recurring cast in front.
+        source_image = source_image.filter(ImageFilter.GaussianBlur(1.35))
     source = _cover_asset(source_image, 1440, 810)
     progress = (math.sin(time * .16 + scene_index * 1.7) + 1) / 2
     if scene_index % 2:
@@ -382,12 +387,23 @@ def _rig_generated_sprite(
     """Animate a single generated cutout as a deterministic articulated 2-D rig."""
     source = _generated_sprite(str(paths["neutral"].resolve())).copy()
     w, h = source.size
+    if speaking:
+        # A small rhythmic mouth overlay makes speech visibly character-bound
+        # without generating and crossfading a second translucent face.
+        openness = .010 + .018 * abs(math.sin(time * 12.0))
+        draw = ImageDraw.Draw(source)
+        draw.ellipse(
+            (.465*w, .225*h, .535*w, (.225+openness)*h),
+            fill=(104, 34, 45, 235), outline=(55, 25, 31, 245),
+            width=max(1, round(w * .006)),
+        )
     definitions = {
-        "left_leg": ([(.27*w,.55*h),(.50*w,.55*h),(.49*w,h),(.19*w,h)], (.40*w,.58*h)),
-        "right_leg": ([(.50*w,.55*h),(.73*w,.55*h),(.81*w,h),(.51*w,h)], (.60*w,.58*h)),
-        "left_arm": ([(.12*w,.27*h),(.39*w,.27*h),(.38*w,.66*h),(.14*w,.72*h),(.05*w,.52*h)], (.31*w,.30*h)),
-        "right_arm": ([(.61*w,.27*h),(.88*w,.27*h),(.95*w,.52*h),(.86*w,.72*h),(.62*w,.66*h)], (.69*w,.30*h)),
-        "head": ([(.23*w,0),(.77*w,0),(.79*w,.31*h),(.21*w,.31*h)], (.50*w,.27*h)),
+        # Only distal limbs move. Keeping shoulders, hips, head and torso in one
+        # opaque layer prevents the paper-cut seams seen with coarse full-limb masks.
+        "left_leg": ([(.25*w,.66*h),(.49*w,.66*h),(.47*w,h),(.18*w,h)], (.40*w,.68*h)),
+        "right_leg": ([(.51*w,.66*h),(.75*w,.66*h),(.82*w,h),(.53*w,h)], (.60*w,.68*h)),
+        "left_arm": ([(.06*w,.39*h),(.29*w,.39*h),(.30*w,.70*h),(.08*w,.73*h)], (.23*w,.41*h)),
+        "right_arm": ([(.71*w,.39*h),(.94*w,.39*h),(.92*w,.73*h),(.70*w,.70*h)], (.77*w,.41*h)),
     }
     parts: dict[str, tuple[Image.Image, tuple[float, float]]] = {}
     combined = Image.new("L", source.size)
@@ -405,17 +421,16 @@ def _rig_generated_sprite(
     cadence = 2.8 if speaking else 1.35
     wave = math.sin(time * cadence * math.pi)
     if pose == "walk":
-        arm, leg, head = 8.0 * wave, 6.0 * wave, 1.2 * wave
+        arm, leg = 10.0 * wave, 7.0 * wave
     elif pose in {"share", "celebrate"}:
-        arm, leg, head = (10.0 if pose == "celebrate" else 6.0) * wave, 1.4 * wave, 1.8 * wave
+        arm, leg = (14.0 if pose == "celebrate" else 9.0) * wave, 2.0 * wave
     elif speaking:
-        arm, leg, head = 5.5 * wave, .8 * wave, 1.6 * wave
+        arm, leg = 8.0 * wave, 1.2 * wave
     else:
-        arm, leg, head = 1.2 * wave, .45 * wave, .7 * wave
+        arm, leg = 2.0 * wave, .7 * wave
     angles = {
         "left_leg": leg, "right_leg": -leg,
         "left_arm": -arm, "right_arm": arm,
-        "head": head,
     }
     canvas = Image.new("RGBA", source.size)
     # Rear limbs, torso, then front limbs/head gives a stable paper-puppet depth order.
@@ -423,7 +438,7 @@ def _rig_generated_sprite(
         part, pivot = parts[name]
         canvas.alpha_composite(part.rotate(angles[name], Image.Resampling.BICUBIC, center=pivot))
     canvas.alpha_composite(body)
-    for name in ("left_arm", "right_arm", "head"):
+    for name in ("left_arm", "right_arm"):
         part, pivot = parts[name]
         canvas.alpha_composite(part.rotate(angles[name], Image.Resampling.BICUBIC, center=pivot))
     return canvas
